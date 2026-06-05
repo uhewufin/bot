@@ -1,0 +1,7 @@
+name = "uhewufinbot"
+main = "src/index.js"
+compatibility_date = "2026-06-05"
+
+[vars]
+APP_ID = "1512069896081506394"
+
