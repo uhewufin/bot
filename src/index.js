@@ -41,18 +41,23 @@ async function verifyKey(body, signature, timestamp, publicKey) {
   const key = await crypto.subtle.importKey(
     'raw',
     hexToUint8Array(publicKey),
-    'ed25519',
+    { name: 'NODE-ED25519', namedCurve: 'NODE-ED25519' }, // Try this format
     false,
     ['verify']
   );
+  
+  // Discord expects the signature to be verified against (timestamp + body)
+  const data = encoder.encode(timestamp + new TextDecoder().decode(body));
+  
   return await crypto.subtle.verify(
-    'ed25519',
+    'NODE-ED25519',
     key,
     hexToUint8Array(signature),
-    encoder.encode(timestamp + new TextDecoder().decode(body))
+    data
   );
 }
 
 function hexToUint8Array(hex) {
   return new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
 }
+
