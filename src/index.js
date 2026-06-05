@@ -1,6 +1,8 @@
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== 'POST') {
+    if (request.method == 'GET') {
+      return new Response('Hey, dude. I dont know how you got here but this is where all of the bot stuff happens, so bye now.', { status: 405 })
+    } else {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
