@@ -3,5 +3,6 @@ main = "src/index.js"
 compatibility_date = "2026-06-05"
 
 [vars]
-APP_ID = "1512069896081506394"
+AID = "1512069896081506394"
+PK = "60285d9dfc164b7813315253214308ef6846a1651b84092b7c8913ee5ca7a639"
 
