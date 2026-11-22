@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
+import importlib.util
 import json
 import os
 import re
-import sys
 from typing import Optional, Tuple
 
 from workers import Response, WorkerEntrypoint
@@ -115,26 +114,30 @@ async def _run_command_module(cmd_name: str, message: dict, env) -> Response:
             {"type": 4, "data": {"content": f"Invalid command name: `{cmd_name}`"}}
         )
 
-    try:
-        module = importlib.import_module(f"cmd.{cmd_name}")
-    except ModuleNotFoundError as err:
-        here = os.path.dirname(__file__)
-        cmd_dir = os.path.join(here, "cmd")
-        here_items = os.listdir(here) if os.path.exists(here) else ["<missing>"]
-        cmd_items = os.listdir(cmd_dir) if os.path.exists(cmd_dir) else ["<no cmd dir>"]
-        debug_text = (
-            f"Error: {err}\n"
-            f"here={here}\n"
-            f"here_items={here_items}\n"
-            f"cmd_items={cmd_items}\n"
-            f"sys.path={sys.path}"
+    cmd_path = os.path.join(os.path.dirname(__file__), "cmd", f"{cmd_name}.py")
+    if not os.path.isfile(cmd_path):
+        return Response.json(
+            {"type": 4, "data": {"content": f"No handler found at `cmd/{cmd_name}.py`."}}
         )
-        return Response.json({"type": 4, "data": {"content": debug_text[:1900]}})
+
+    spec = importlib.util.spec_from_file_location(f"cmd.{cmd_name}", cmd_path)
+    if spec is None or spec.loader is None:
+        return Response.json(
+            {"type": 4, "data": {"content": f"Failed to load spec for `cmd/{cmd_name}.py`."}}
+        )
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
     handler = getattr(module, "run", None)
     if not callable(handler):
         return Response.json(
-            {"type": 4, "data": {"content": f"`cmd/{cmd_name}.py` is missing `async def run(message, env)`."}}
+            {
+                "type": 4,
+                "data": {
+                    "content": f"`cmd/{cmd_name}.py` is missing `async def run(message, env)`."
+                },
+            }
         )
 
     result = await handler(message, env)
