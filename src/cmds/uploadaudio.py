@@ -4,8 +4,6 @@ import json
 import os
 import re
 import uuid
-from js import Promise
-from pyodide.ffi import create_proxy
 from workers import fetch
 
 _KV_POOL_KEY = "cookie_pool"
@@ -20,6 +18,36 @@ _DISCORD_HEADERS = {
 }
 
 
+def _schedule_background(ctx, coro) -> None:
+    # Cloudflare's Python Workers runtime converts a coroutine to a
+    # JS Promise automatically when passed to ctx.wait_until() -
+    # no need to hand-build one with js.Promise / create_proxy.
+    if ctx is not None and hasattr(ctx, "wait_until"):
+        ctx.wait_until(coro)
+    else:
+        asyncio.ensure_future(coro)
+
+
+async def _send_message(app_id: str, token: str, content: str) -> None:
+    if not app_id or not token:
+        print("[button] missing app_id or token, aborting send")
+        return
+    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}"
+    try:
+        res = await fetch(
+            url,
+            method="POST",
+            headers=_DISCORD_HEADERS,
+            body=json.dumps({"content": content[:1950]}),
+        )
+        print(f"[button] POST status={res.status}")
+        if res.status >= 300:
+            body = await res.text()
+            print(f"[button] POST body={body}")
+    except Exception as exc:
+        print(f"[button] fetch raised: {exc}")
+
+
 def _message(content: str, components: list | None = None) -> dict:
     data = {"content": content[:1950]}
     if components is not None:
@@ -28,34 +56,6 @@ def _message(content: str, components: list | None = None) -> dict:
         "type": 4,
         "data": data,
     }
-
-
-def _deferred_update_message() -> dict:
-    return {
-        "type": 6,
-    }
-
-
-def _schedule_background(ctx, coro) -> None:
-    if ctx is None or not hasattr(ctx, "wait_until"):
-        asyncio.ensure_future(coro)
-        return
-
-    def _executor(resolve, reject):
-        async def _runner():
-            try:
-                res = await coro
-                resolve(res)
-            except Exception as exc:
-                print(f"[uploadaudio] Background error: {exc}")
-                resolve(None)
-
-        task = asyncio.ensure_future(_runner())
-        task.add_done_callback(lambda _t: None)
-
-    exec_proxy = create_proxy(_executor)
-    promise = Promise.new(exec_proxy)
-    ctx.wait_until(promise)
 
 
 def _parse_groups(env) -> tuple[list[tuple[str, int]], str | None]:
@@ -259,42 +259,6 @@ async def _upload_to_roblox_group(
     return True, data
 
 
-async def _create_status_message(app_id: str, token: str, content: str) -> str | None:
-    if not app_id or not token:
-        return None
-    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}?wait=true"
-    res = await fetch(
-        url,
-        method="POST",
-        headers=_DISCORD_HEADERS,
-        body=json.dumps({"content": content[:1950]}),
-    )
-    text_body = await res.text()
-    print(f"[uploadaudio] Create status={res.status} body={text_body[:250]}")
-    if res.status < 200 or res.status >= 300:
-        return None
-    try:
-        data = json.loads(text_body)
-        msg_id = data.get("id")
-        return str(msg_id) if msg_id else None
-    except Exception:
-        return None
-
-
-async def _edit_status_message(app_id: str, token: str, message_id: str | None, content: str) -> None:
-    if not app_id or not token:
-        return
-    target = f"messages/{message_id}" if message_id else "messages/@original"
-    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}/{target}"
-    res = await fetch(
-        url,
-        method="PATCH",
-        headers=_DISCORD_HEADERS,
-        body=json.dumps({"content": content[:1950]}),
-    )
-    print(f"[uploadaudio] Edit ({target}) status={res.status}")
-
-
 async def run(message: dict, env, ctx=None):
     groups, group_err = _parse_groups(env)
     if group_err:
@@ -336,26 +300,22 @@ async def run(message: dict, env, ctx=None):
     )
 
 
-async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: int) -> None:
+async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -> None:
     app_id = str(interaction.get("application_id") or "")
     token = str(interaction.get("token") or "")
-    status_msg_id: str | None = None
 
     try:
         kv = getattr(env, "UhewBotCookieKV", None)
         if kv is None:
-            status_msg_id = await _create_status_message(app_id, token, "Uploading...")
-            await _edit_status_message(app_id, token, status_msg_id, "`UhewBotCookieKV` is not bound.")
+            await _send_message(app_id, token, "`UhewBotCookieKV` is not bound.")
             return
 
         pending_key = f"{_PENDING_PREFIX}{job_id}"
         raw_pending = await kv.get(pending_key)
         if not raw_pending:
-            status_msg_id = await _create_status_message(app_id, token, "Checking upload...")
-            await _edit_status_message(
+            await _send_message(
                 app_id,
                 token,
-                status_msg_id,
                 "This upload prompt expired or was already used. Run `/uploadaudio` again.",
             )
             return
@@ -365,8 +325,7 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
         try:
             pending = json.loads(raw_pending)
         except Exception:
-            status_msg_id = await _create_status_message(app_id, token, "Checking upload...")
-            await _edit_status_message(app_id, token, status_msg_id, "Failed to read pending upload data.")
+            await _send_message(app_id, token, "Failed to read pending upload data.")
             return
 
         att_url = pending.get("url")
@@ -378,77 +337,76 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
             f"Group {group_id}",
         )
 
-        # Post the normal "Uploading to {group}..." message immediately and capture its ID
-        status_msg_id = await _create_status_message(
-            app_id,
-            token,
-            f"Uploading to **{group_label}**...",
-        )
+        await _send_message(app_id, token, f"Uploading **{audio_name}** to **{group_label}** (`{group_id}`)...")
 
         cookie_val, account_label, cookie_err = await _get_first_cookie(env)
         if cookie_err or not cookie_val:
-            await _edit_status_message(
-                app_id,
-                token,
-                status_msg_id,
-                f"Could not get cookie from pool: {cookie_err}",
-            )
+            await _send_message(app_id, token, f"Could not get cookie from pool: {cookie_err}")
             return
 
         raw_bytes, dl_err = await _download_attachment(str(att_url))
         if dl_err or raw_bytes is None:
-            await _edit_status_message(
-                app_id,
-                token,
-                status_msg_id,
-                dl_err or "Failed to download file.",
-            )
+            await _send_message(app_id, token, dl_err or "Failed to download file.")
             return
 
         duration = _estimate_duration_seconds(raw_bytes, filename)
         ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
         if not ok:
-            await _edit_status_message(
+            await _send_message(
                 app_id,
                 token,
-                status_msg_id,
                 f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}",
             )
             return
 
         asset_id = result.get("Id") if isinstance(result, dict) else None
         if asset_id:
-            await _edit_status_message(
+            await _send_message(
                 app_id,
                 token,
-                status_msg_id,
                 f"Uploaded **{audio_name}** to **{group_label}** (`{group_id}`) via **{account_label}**!\n"
                 f"- **Asset ID:** `{asset_id}`\n"
                 f"- **Sound ID:** `rbxassetid://{asset_id}`",
             )
         else:
-            await _edit_status_message(
+            await _send_message(
                 app_id,
                 token,
-                status_msg_id,
                 f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
             )
     except Exception as exc:
         print(f"[uploadaudio] Exception: {exc}")
-        await _edit_status_message(app_id, token, status_msg_id, f"Unexpected upload error: `{exc}`")
+        await _send_message(app_id, token, f"Unexpected upload error: `{exc}`")
 
 
 async def handle_component(interaction: dict, env, ctx=None) -> dict:
     custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
+    print(f"[button] handle_component called, ctx={ctx!r}, custom_id={custom_id}")
     parts = custom_id.split(":")
     if len(parts) != 3 or parts[0] != "uploadaudio_group":
-        return _message("Unknown button action.")
+        _schedule_background(ctx, _on_button_click_unknown(interaction, custom_id))
+        return {"type": 6}
 
     job_id = parts[1]
     try:
         group_id = int(parts[2])
     except ValueError:
-        return _message("Invalid group selection.")
+        _schedule_background(
+            ctx,
+            _send_message(
+                str(interaction.get("application_id") or ""),
+                str(interaction.get("token") or ""),
+                "Invalid group selection.",
+            ),
+        )
+        return {"type": 6}
 
-    _schedule_background(ctx, _execute_group_upload(interaction, env, job_id, group_id))
-    return _deferred_update_message()
+    _schedule_background(ctx, _on_button_click(interaction, env, job_id, group_id))
+    return {"type": 6}
+
+
+async def _on_button_click_unknown(interaction: dict, custom_id: str) -> None:
+    app_id = str(interaction.get("application_id") or "")
+    token = str(interaction.get("token") or "")
+    await _send_message(app_id, token, f"Unknown button action: `{custom_id}`")
+        
