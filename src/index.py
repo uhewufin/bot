@@ -1,7 +1,7 @@
+import importlib
 import json
 from urllib.parse import urlparse
 from workers import Response, WorkerEntrypoint
-from cmd import addcookie, viewcookies
 
 try:
     from nacl.signing import VerifyKey
@@ -40,6 +40,24 @@ def _ephemeral(content: str) -> dict:
             "flags": 64,
         },
     }
+
+
+async def _dispatch_command(cmd_name: str, interaction: dict, env) -> dict:
+    if not cmd_name or not cmd_name.isidentifier():
+        return _ephemeral(f"Invalid command name: `/{cmd_name}`")
+
+    try:
+        module = importlib.import_module(f"cmds.{cmd_name}")
+    except ModuleNotFoundError:
+        return _ephemeral(f"No command handler found for `/{cmd_name}`.")
+    except Exception as exc:
+        return _ephemeral(f"Failed to load `/{cmd_name}`: `{exc}`")
+
+    handler = getattr(module, "run", None)
+    if not callable(handler):
+        return _ephemeral(f"Command `/{cmd_name}` is missing a `run(message, env)` function.")
+
+    return await handler(interaction, env)
 
 
 class Default(WorkerEntrypoint):
@@ -85,17 +103,9 @@ class Default(WorkerEntrypoint):
 
         if interaction_type == 2:
             data = interaction.get("data") or {}
-            cmd_name = data.get("name")
-
-            if cmd_name == "addcookie":
-                result = await addcookie.run(interaction, env)
-                return _json_response(result)
-
-            if cmd_name == "viewcookies":
-                result = await viewcookies.run(interaction, env)
-                return _json_response(result)
-
-            return _json_response(_ephemeral(f"Unknown command: `/{cmd_name}`"))
+            cmd_name = data.get("name") or ""
+            result = await _dispatch_command(cmd_name, interaction, env)
+            return _json_response(result)
 
         return _json_response({"error": "Unsupported interaction type"}, status=400)
         
