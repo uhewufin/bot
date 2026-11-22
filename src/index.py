@@ -7,9 +7,14 @@ import re
 from typing import Optional, Tuple
 
 from workers import Response, WorkerEntrypoint
+import os
 import sys
+from js import console
 
-print("sys.path:", sys.path)
+console.log("sys.path:", str(sys.path))
+console.log("cwd:", os.getcwd())
+console.log("src files:", str(os.listdir(os.path.dirname(__file__))))
+
 
 
 # Ed25519 parameters from RFC 8032. Keeping verification in the standard
