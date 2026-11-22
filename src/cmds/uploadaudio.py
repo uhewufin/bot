@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -153,13 +154,27 @@ def _estimate_duration_seconds(raw_bytes: bytes, filename: str) -> float:
     return round(max(1.0, len(raw_bytes) / bytes_per_sec), 2)
 
 
+async def _response_to_bytes(res) -> bytes:
+    if hasattr(res, "bytes"):
+        b = await res.bytes()
+        return bytes(b)
+    buf = await res.arrayBuffer()
+    py_buf = buf.to_py()
+    if isinstance(py_buf, (bytes, bytearray, memoryview)):
+        return bytes(py_buf)
+    try:
+        from js import Uint8Array
+        return bytes(Uint8Array.new(buf).to_py())
+    except Exception:
+        return bytes(py_buf)
+
+
 async def _download_attachment(url: str) -> tuple[bytes | None, str | None]:
     res = await fetch(url, method="GET")
     if res.status != 200:
         return None, f"Failed to download Discord attachment (HTTP {res.status})."
 
-    buf = await res.arrayBuffer()
-    raw_bytes = bytes(buf.to_py())
+    raw_bytes = await _response_to_bytes(res)
     if not raw_bytes:
         return None, "Downloaded attachment is empty."
     if len(raw_bytes) > _MAX_BYTES:
@@ -367,6 +382,9 @@ async def handle_component(interaction: dict, env, ctx=None) -> dict:
     except ValueError:
         return _message("Invalid group selection.")
 
-    await _execute_group_upload(interaction, env, job_id, group_id)
+    task = asyncio.create_task(_execute_group_upload(interaction, env, job_id, group_id))
+    if ctx is not None and hasattr(ctx, "wait_until"):
+        ctx.wait_until(task)
+
     return _deferred_update_message()
     
