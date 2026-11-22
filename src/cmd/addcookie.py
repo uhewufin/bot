@@ -31,7 +31,7 @@ def _ephemeral(content: str) -> dict:
     }
 
 
-async def _check_cookie_alive(cookie_val: str) -> tuple[bool, str]:
+async def _check_cookie_alive(cookie_val: str) -> tuple[bool, dict | None, str]:
     res = await fetch(
         "https://users.roblox.com/v1/users/authenticated",
         headers={
@@ -43,28 +43,29 @@ async def _check_cookie_alive(cookie_val: str) -> tuple[bool, str]:
     if res.status != 200:
         return (
             False,
+            None,
             f"Roblox auth check failed (HTTP {res.status}; cookie may be expired, invalid, or termed).",
         )
 
     try:
         data = json.loads(await res.text())
     except Exception:
-        return False, "Roblox auth check returned invalid JSON."
+        return False, None, "Roblox auth check returned invalid JSON."
 
     user_id = data.get("id")
     username = data.get("name")
-    if not user_id:
-        return False, "Cookie did not resolve to an authenticated user."
+    if not user_id or not username:
+        return False, None, "Cookie did not resolve to an authenticated user."
 
-    return True, f"Valid cookie for **{username}** (`{user_id}`)."
+    return True, {"id": user_id, "name": username}, f"Valid cookie for **{username}** (`{user_id}`)."
 
 
-async def _save_to_kv(env, cookie_val: str) -> tuple[bool, str]:
-    kv = getattr(env, "COOKIES_KV", None)
+async def _save_to_kv(env, cookie_val: str, user_info: dict) -> tuple[bool, str]:
+    kv = getattr(env, "UhewBotCookieKV", None)
     if kv is None:
         return (
             False,
-            "Cookie was verified, **but `COOKIES_KV` is not bound in `wrangler.toml`**—nothing was saved.",
+            "Cookie was verified, **but `UhewBotCookieKV` is not bound in `wrangler.toml`**—nothing was saved.",
         )
 
     existing_raw = await kv.get(_KV_POOL_KEY)
@@ -75,12 +76,37 @@ async def _save_to_kv(env, cookie_val: str) -> tuple[bool, str]:
     except Exception:
         pool = []
 
-    if cookie_val in pool:
-        return True, f"Already in pool ({len(pool)} total)."
+    updated = False
+    for idx, entry in enumerate(pool):
+        if isinstance(entry, dict) and entry.get("cookie") == cookie_val:
+            pool[idx] = {
+                "cookie": cookie_val,
+                "username": user_info["name"],
+                "user_id": user_info["id"],
+            }
+            updated = True
+            break
+        elif isinstance(entry, str) and entry == cookie_val:
+            pool[idx] = {
+                "cookie": cookie_val,
+                "username": user_info["name"],
+                "user_id": user_info["id"],
+            }
+            updated = True
+            break
 
-    pool.append(cookie_val)
+    if not updated:
+        pool.append(
+            {
+                "cookie": cookie_val,
+                "username": user_info["name"],
+                "user_id": user_info["id"],
+            }
+        )
+
     await kv.put(_KV_POOL_KEY, json.dumps(pool))
-    return True, f"Saved to KV ({len(pool)} total in pool)."
+    status_word = "Updated existing entry in" if updated else "Saved to"
+    return True, f"{status_word} KV ({len(pool)} total in pool)."
 
 
 async def run(message: dict, env):
@@ -92,11 +118,11 @@ async def run(message: dict, env):
             "Invalid `.ROBLOSECURITY` format. Expected a token starting with `_|WARNING:...`."
         )
 
-    ok, detail = await _check_cookie_alive(cookie_val)
-    if not ok:
+    ok, user_info, detail = await _check_cookie_alive(cookie_val)
+    if not ok or not user_info:
         return _ephemeral(f"Cookie rejected: {detail}")
 
-    saved, storage_msg = await _save_to_kv(env, cookie_val)
+    saved, storage_msg = await _save_to_kv(env, cookie_val, user_info)
     if not saved:
         return _ephemeral(f"{detail}\n{storage_msg}")
 
