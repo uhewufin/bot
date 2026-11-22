@@ -1,8 +1,8 @@
-name = "bot"
+name = "uhewbot"
 main = "src/index.py"
-compatibility_date = "2026-06-05"
+compatibility_date = "2025-01-01"
 compatibility_flags = ["python_workers"]
 
-[observability.logs]
-enabled = true
-invocation_logs = true
+[[kv_namespaces]]
+binding = "UhewBotCookieKV"
+id = "081e7d96b23147d988f7679c8566af7d"
