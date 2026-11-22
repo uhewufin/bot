@@ -42,4 +42,4 @@ async def run(message: dict, env):
             lines.append(f"{i}. *Legacy entry (no username)*")
 
     return _ephemeral("\n".join(lines))
-  
+    
