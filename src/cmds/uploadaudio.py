@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 import os
@@ -11,26 +10,14 @@ _PENDING_PREFIX = "pending_audio:"
 _PUBLISH_URL = "https://publish.roblox.com/v1/audio"
 _MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 
-_DISCORD_HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "User-Agent": "DiscordBot (https://bot.liampark79394.workers.dev/, 1.0)",
-}
-
 
 def _message(content: str, components: list | None = None) -> dict:
-    data = {"content": content}
+    data = {"content": content[:1950]}
     if components is not None:
         data["components"] = components
     return {
         "type": 4,
         "data": data,
-    }
-
-
-def _deferred_update_message() -> dict:
-    return {
-        "type": 6,
     }
 
 
@@ -235,21 +222,6 @@ async def _upload_to_roblox_group(
     return True, data
 
 
-async def _send_new_message(app_id: str, token: str, content: str) -> None:
-    if not app_id or not token:
-        print("[uploadaudio] Missing app_id or token for followup")
-        return
-    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}"
-    res = await fetch(
-        url,
-        method="POST",
-        headers=_DISCORD_HEADERS,
-        body=json.dumps({"content": content[:1950]}),
-    )
-    body_text = await res.text()
-    print(f"[uploadaudio] Followup POST status={res.status} body={body_text[:300]}")
-
-
 async def run(message: dict, env, ctx=None):
     groups, group_err = _parse_groups(env)
     if group_err:
@@ -291,34 +263,34 @@ async def run(message: dict, env, ctx=None):
     )
 
 
-async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: int) -> None:
-    app_id = str(interaction.get("application_id") or "")
-    token = str(interaction.get("token") or "")
-    print(f"[uploadaudio] Executing job={job_id} group={group_id} app_id={app_id}")
+async def handle_component(interaction: dict, env, ctx=None) -> dict:
+    custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
+    parts = custom_id.split(":")
+    if len(parts) != 3 or parts[0] != "uploadaudio_group":
+        return _message("Unknown button action.")
+
+    job_id = parts[1]
+    try:
+        group_id = int(parts[2])
+    except ValueError:
+        return _message("Invalid group selection.")
 
     try:
         kv = getattr(env, "UhewBotCookieKV", None)
         if kv is None:
-            await _send_new_message(app_id, token, "`UhewBotCookieKV` is not bound.")
-            return
+            return _message("`UhewBotCookieKV` is not bound.")
 
         pending_key = f"{_PENDING_PREFIX}{job_id}"
         raw_pending = await kv.get(pending_key)
         if not raw_pending:
-            await _send_new_message(
-                app_id,
-                token,
-                "This upload prompt expired or was already used. Run `/uploadaudio` again.",
-            )
-            return
+            return _message("This upload prompt expired or was already used. Run `/uploadaudio` again.")
 
         await kv.delete(pending_key)
 
         try:
             pending = json.loads(raw_pending)
         except Exception:
-            await _send_new_message(app_id, token, "Failed to read pending upload data.")
-            return
+            return _message("Failed to read pending upload data.")
 
         att_url = pending.get("url")
         filename = str(pending.get("filename") or "audio.mp3")
@@ -331,60 +303,28 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
 
         cookie_val, account_label, cookie_err = await _get_first_cookie(env)
         if cookie_err or not cookie_val:
-            await _send_new_message(app_id, token, f"Could not get cookie from pool: {cookie_err}")
-            return
+            return _message(f"Could not get cookie from pool: {cookie_err}")
 
         raw_bytes, dl_err = await _download_attachment(str(att_url))
         if dl_err or raw_bytes is None:
-            await _send_new_message(app_id, token, dl_err or "Failed to download file.")
-            return
+            return _message(dl_err or "Failed to download file.")
 
         duration = _estimate_duration_seconds(raw_bytes, filename)
         ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
         if not ok:
-            await _send_new_message(
-                app_id,
-                token,
-                f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}",
-            )
-            return
+            return _message(f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}")
 
         asset_id = result.get("Id") if isinstance(result, dict) else None
         if asset_id:
-            await _send_new_message(
-                app_id,
-                token,
+            return _message(
                 f"Uploaded **{audio_name}** to **{group_label}** (`{group_id}`) via **{account_label}**!\n"
                 f"- **Asset ID:** `{asset_id}`\n"
-                f"- **Sound ID:** `rbxassetid://{asset_id}`",
+                f"- **Sound ID:** `rbxassetid://{asset_id}`"
             )
-        else:
-            await _send_new_message(
-                app_id,
-                token,
-                f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
-            )
+
+        return _message(
+            f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`"
+        )
     except Exception as exc:
-        print(f"[uploadaudio] Exception: {exc}")
-        await _send_new_message(app_id, token, f"Unexpected upload error: `{exc}`")
-
-
-async def handle_component(interaction: dict, env, ctx=None) -> dict:
-    custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
-    print(f"[uploadaudio] handle_component custom_id={custom_id}")
-    parts = custom_id.split(":")
-    if len(parts) != 3 or parts[0] != "uploadaudio_group":
-        return _message("Unknown button action.")
-
-    job_id = parts[1]
-    try:
-        group_id = int(parts[2])
-    except ValueError:
-        return _message("Invalid group selection.")
-
-    task = asyncio.create_task(_execute_group_upload(interaction, env, job_id, group_id))
-    if ctx is not None and hasattr(ctx, "wait_until"):
-        ctx.wait_until(task)
-
-    return _deferred_update_message()
-    
+        return _message(f"Unexpected upload error: `{exc}`")
+            
