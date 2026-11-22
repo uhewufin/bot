@@ -7,6 +7,9 @@ import re
 from typing import Optional, Tuple
 
 from workers import Response, WorkerEntrypoint
+import sys
+
+print("sys.path:", sys.path)
 
 
 # Ed25519 parameters from RFC 8032. Keeping verification in the standard
