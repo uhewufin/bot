@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import importlib
+import inspect
 import json
 from urllib.parse import urlparse
 from workers import Response, WorkerEntrypoint
@@ -126,7 +127,18 @@ def _ephemeral(content: str) -> dict:
     }
 
 
-async def _dispatch_command(cmd_name: str, interaction: dict, env) -> dict:
+async def _invoke_handler(handler, interaction: dict, env, ctx) -> dict:
+    sig = inspect.signature(handler)
+    params = [
+        p for p in sig.parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(params) >= 3:
+        return await handler(interaction, env, ctx)
+    return await handler(interaction, env)
+
+
+async def _dispatch_command(cmd_name: str, interaction: dict, env, ctx=None) -> dict:
     if not cmd_name or not cmd_name.isidentifier():
         return _ephemeral(f"Invalid command name: `/{cmd_name}`")
 
@@ -141,23 +153,43 @@ async def _dispatch_command(cmd_name: str, interaction: dict, env) -> dict:
     if not callable(handler):
         return _ephemeral(f"Command `/{cmd_name}` is missing a `run(message, env)` function.")
 
-    return await handler(interaction, env)
+    return await _invoke_handler(handler, interaction, env, ctx)
+
+
+async def _dispatch_component(interaction: dict, env, ctx=None) -> dict:
+    custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
+    if custom_id.startswith("uploadaudio_group:"):
+        try:
+            module = importlib.import_module("cmds.uploadaudio")
+        except Exception as exc:
+            return _ephemeral(f"Failed to load `cmds.uploadaudio`: `{exc}`")
+
+        comp_handler = getattr(module, "handle_component", None)
+        if not callable(comp_handler):
+            return _ephemeral("`cmds.uploadaudio` is missing `handle_component`.")
+
+        return await _invoke_handler(comp_handler, interaction, env, ctx)
+
+    return _ephemeral("Unhandled component interaction.")
 
 
 class Default(WorkerEntrypoint):
     async def on_fetch(self, request):
         env = self.env
+        ctx = getattr(self, "ctx", None)
 
         if request.method == "GET":
             path = urlparse(request.url).path
             if path in ("/", "/health"):
                 kv_bound = getattr(env, "UhewBotCookieKV", None) is not None
                 pid_set = bool(getattr(env, "PID", "") or "")
+                groups_set = bool(getattr(env, "groups", "") or "")
                 return _json_response({
                     "ok": True,
                     "bot": "uhewbot",
                     "kv_bound": kv_bound,
                     "pid_set": pid_set,
+                    "groups_set": groups_set,
                 })
             return _json_response({"error": "Not found"}, status=404)
 
@@ -188,7 +220,12 @@ class Default(WorkerEntrypoint):
         if interaction_type == 2:
             data = interaction.get("data") or {}
             cmd_name = data.get("name") or ""
-            result = await _dispatch_command(cmd_name, interaction, env)
+            result = await _dispatch_command(cmd_name, interaction, env, ctx)
+            return _json_response(result)
+
+        if interaction_type == 3:
+            result = await _dispatch_component(interaction, env, ctx)
             return _json_response(result)
 
         return _json_response({"error": "Unsupported interaction type"}, status=400)
+        
