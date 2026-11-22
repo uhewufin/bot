@@ -19,9 +19,6 @@ _DISCORD_HEADERS = {
 
 
 def _schedule_background(ctx, coro) -> None:
-    # Cloudflare's Python Workers runtime converts a coroutine to a
-    # JS Promise automatically when passed to ctx.wait_until() -
-    # no need to hand-build one with js.Promise / create_proxy.
     if ctx is not None and hasattr(ctx, "wait_until"):
         ctx.wait_until(coro)
     else:
@@ -379,34 +376,32 @@ async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -
         await _send_message(app_id, token, f"Unexpected upload error: `{exc}`")
 
 
+async def _on_button_click_unknown(interaction: dict, custom_id: str) -> None:
+    app_id = str(interaction.get("application_id") or "")
+    token = str(interaction.get("token") or "")
+    await _send_message(app_id, token, f"Unknown button action: `{custom_id}`")
+
+
 async def handle_component(interaction: dict, env, ctx=None) -> dict:
     custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
     print(f"[button] handle_component called, ctx={ctx!r}, custom_id={custom_id}")
+
     parts = custom_id.split(":")
     if len(parts) != 3 or parts[0] != "uploadaudio_group":
-        _schedule_background(ctx, _on_button_click_unknown(interaction, custom_id))
+        await _on_button_click_unknown(interaction, custom_id)
         return {"type": 6}
 
     job_id = parts[1]
     try:
         group_id = int(parts[2])
     except ValueError:
-        _schedule_background(
-            ctx,
-            _send_message(
-                str(interaction.get("application_id") or ""),
-                str(interaction.get("token") or ""),
-                "Invalid group selection.",
-            ),
+        await _send_message(
+            str(interaction.get("application_id") or ""),
+            str(interaction.get("token") or ""),
+            "Invalid group selection.",
         )
         return {"type": 6}
 
-    _schedule_background(ctx, _on_button_click(interaction, env, job_id, group_id))
+    await _on_button_click(interaction, env, job_id, group_id)
     return {"type": 6}
-
-
-async def _on_button_click_unknown(interaction: dict, custom_id: str) -> None:
-    app_id = str(interaction.get("application_id") or "")
-    token = str(interaction.get("token") or "")
-    await _send_message(app_id, token, f"Unknown button action: `{custom_id}`")
-        
+    
