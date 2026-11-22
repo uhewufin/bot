@@ -1,6 +1,7 @@
 name = "uhewufinbot"
-main = "src/index.js"
+main = "src/index.py"
 compatibility_date = "2026-06-05"
+compatibility_flags = ["python_workers"]
 
 [vars]
 AID = "1512069896081506394"
