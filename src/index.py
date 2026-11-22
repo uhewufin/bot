@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import re
 from typing import Optional, Tuple
 
 from workers import Response, WorkerEntrypoint
@@ -15,6 +17,7 @@ _D = (-121665 * pow(121666, _Q - 2, _Q)) % _Q
 _I = pow(2, (_Q - 1) // 4, _Q)
 _IDENTITY = (0, 1)
 _Point = Tuple[int, int]
+_CMD_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
 def _decode_point(encoded: bytes) -> Optional[_Point]:
@@ -105,6 +108,31 @@ def _verify_ed25519(public_key_hex: str, signature_hex: str, message: bytes) -> 
     )
 
 
+async def _run_command_module(cmd_name: str, message: dict, env) -> Response:
+    if not _CMD_NAME_RE.match(cmd_name):
+        return Response.json(
+            {"type": 4, "data": {"content": f"Invalid command name: `{cmd_name}`"}}
+        )
+
+    try:
+        module = importlib.import_module(f"cmd.{cmd_name}")
+    except ModuleNotFoundError:
+        return Response.json(
+            {"type": 4, "data": {"content": f"No handler found at `cmd/{cmd_name}.py`."}}
+        )
+
+    handler = getattr(module, "run", None)
+    if not callable(handler):
+        return Response.json(
+            {"type": 4, "data": {"content": f"`cmd/{cmd_name}.py` is missing `async def run(message, env)`."}}
+        )
+
+    result = await handler(message, env)
+    if isinstance(result, Response):
+        return result
+    return Response.json(result)
+
+
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
         if request.method == "GET":
@@ -140,11 +168,13 @@ class Default(WorkerEntrypoint):
             return Response.json({"type": 1})
 
         if message.get("type") == 2:  # Discord application command
-            return Response.json(
-                {
-                    "type": 4,
-                    "data": {"content": "Hello! Your bot is working."},
-                }
-            )
+            data = message.get("data") or {}
+            cmd_name = data.get("name")
+            if not isinstance(cmd_name, str):
+                return Response.json(
+                    {"type": 4, "data": {"content": "Missing command name."}}
+                )
+            return await _run_command_module(cmd_name, message, self.env)
 
         return Response("Unknown", status=404)
+        
