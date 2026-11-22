@@ -174,9 +174,9 @@ async def _dispatch_component(interaction: dict, env, ctx=None) -> dict:
 
 
 class Default(WorkerEntrypoint):
-    async def on_fetch(self, request):
-        env = self.env
-        ctx = getattr(self, "ctx", None)
+    async def on_fetch(self, request, env=None, ctx=None):
+        env = env or self.env
+        ctx = ctx or getattr(self, "ctx", None)
 
         if request.method == "GET":
             path = urlparse(request.url).path
