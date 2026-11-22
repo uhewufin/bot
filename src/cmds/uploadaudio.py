@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -9,6 +10,12 @@ _KV_POOL_KEY = "cookie_pool"
 _PENDING_PREFIX = "pending_audio:"
 _PUBLISH_URL = "https://publish.roblox.com/v1/audio"
 _MAX_BYTES = 20 * 1024 * 1024  # 20 MB
+
+_DISCORD_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "DiscordBot (https://bot.liampark79394.workers.dev/, 1.0)",
+}
 
 
 def _ephemeral(content: str) -> dict:
@@ -218,7 +225,11 @@ async def _delete_original_message(app_id: str, token: str) -> None:
     if not app_id or not token:
         return
     url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}/messages/@original"
-    await fetch(url, method="DELETE")
+    await fetch(
+        url,
+        method="DELETE",
+        headers={"User-Agent": _DISCORD_HEADERS["User-Agent"]},
+    )
 
 
 async def _send_followup_ephemeral(app_id: str, token: str, content: str) -> None:
@@ -228,7 +239,7 @@ async def _send_followup_ephemeral(app_id: str, token: str, content: str) -> Non
     await fetch(
         url,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=_DISCORD_HEADERS,
         body=json.dumps({"content": content, "flags": 64}),
     )
 
@@ -282,68 +293,78 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
     app_id = str(interaction.get("application_id") or "")
     token = str(interaction.get("token") or "")
 
-    await _delete_original_message(app_id, token)
-
-    kv = getattr(env, "UhewBotCookieKV", None)
-    if kv is None:
-        await _send_followup_ephemeral(app_id, token, "`UhewBotCookieKV` is not bound.")
-        return
-
-    pending_key = f"{_PENDING_PREFIX}{job_id}"
-    raw_pending = await kv.get(pending_key)
-    if not raw_pending:
-        await _send_followup_ephemeral(app_id, token, "This upload prompt expired or was already used. Run `/uploadaudio` again.")
-        return
-
-    await kv.delete(pending_key)
-
     try:
-        pending = json.loads(raw_pending)
-    except Exception:
-        await _send_followup_ephemeral(app_id, token, "Failed to read pending upload data.")
-        return
+        await _delete_original_message(app_id, token)
 
-    att_url = pending.get("url")
-    filename = str(pending.get("filename") or "audio.mp3")
-    audio_name = str(pending.get("name") or "Uploaded Audio")
-    group_map = pending.get("groups") or {}
-    group_label = next((g_name for g_name, g_id in group_map.items() if int(g_id) == group_id), f"Group {group_id}")
+        kv = getattr(env, "UhewBotCookieKV", None)
+        if kv is None:
+            await _send_followup_ephemeral(app_id, token, "`UhewBotCookieKV` is not bound.")
+            return
 
-    cookie_val, account_label, cookie_err = await _get_first_cookie(env)
-    if cookie_err or not cookie_val:
-        await _send_followup_ephemeral(app_id, token, f"Could not get cookie from pool: {cookie_err}")
-        return
+        pending_key = f"{_PENDING_PREFIX}{job_id}"
+        raw_pending = await kv.get(pending_key)
+        if not raw_pending:
+            await _send_followup_ephemeral(
+                app_id,
+                token,
+                "This upload prompt expired or was already used. Run `/uploadaudio` again.",
+            )
+            return
 
-    raw_bytes, dl_err = await _download_attachment(str(att_url))
-    if dl_err or raw_bytes is None:
-        await _send_followup_ephemeral(app_id, token, dl_err or "Failed to download file.")
-        return
+        await kv.delete(pending_key)
 
-    duration = _estimate_duration_seconds(raw_bytes, filename)
-    ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
-    if not ok:
-        await _send_followup_ephemeral(
-            app_id,
-            token,
-            f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}",
+        try:
+            pending = json.loads(raw_pending)
+        except Exception:
+            await _send_followup_ephemeral(app_id, token, "Failed to read pending upload data.")
+            return
+
+        att_url = pending.get("url")
+        filename = str(pending.get("filename") or "audio.mp3")
+        audio_name = str(pending.get("name") or "Uploaded Audio")
+        group_map = pending.get("groups") or {}
+        group_label = next(
+            (g_name for g_name, g_id in group_map.items() if int(g_id) == group_id),
+            f"Group {group_id}",
         )
-        return
 
-    asset_id = result.get("Id") if isinstance(result, dict) else None
-    if asset_id:
-        await _send_followup_ephemeral(
-            app_id,
-            token,
-            f"Uploaded **{audio_name}** to **{group_label}** (`{group_id}`) via **{account_label}**!\n"
-            f"- **Asset ID:** `{asset_id}`\n"
-            f"- **Sound ID:** `rbxassetid://{asset_id}`",
-        )
-    else:
-        await _send_followup_ephemeral(
-            app_id,
-            token,
-            f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
-        )
+        cookie_val, account_label, cookie_err = await _get_first_cookie(env)
+        if cookie_err or not cookie_val:
+            await _send_followup_ephemeral(app_id, token, f"Could not get cookie from pool: {cookie_err}")
+            return
+
+        raw_bytes, dl_err = await _download_attachment(str(att_url))
+        if dl_err or raw_bytes is None:
+            await _send_followup_ephemeral(app_id, token, dl_err or "Failed to download file.")
+            return
+
+        duration = _estimate_duration_seconds(raw_bytes, filename)
+        ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
+        if not ok:
+            await _send_followup_ephemeral(
+                app_id,
+                token,
+                f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}",
+            )
+            return
+
+        asset_id = result.get("Id") if isinstance(result, dict) else None
+        if asset_id:
+            await _send_followup_ephemeral(
+                app_id,
+                token,
+                f"Uploaded **{audio_name}** to **{group_label}** (`{group_id}`) via **{account_label}**!\n"
+                f"- **Asset ID:** `{asset_id}`\n"
+                f"- **Sound ID:** `rbxassetid://{asset_id}`",
+            )
+        else:
+            await _send_followup_ephemeral(
+                app_id,
+                token,
+                f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
+            )
+    except Exception as exc:
+        await _send_followup_ephemeral(app_id, token, f"Unexpected upload error: `{exc}`")
 
 
 async def handle_component(interaction: dict, env, ctx=None) -> dict:
@@ -358,11 +379,9 @@ async def handle_component(interaction: dict, env, ctx=None) -> dict:
     except ValueError:
         return _ephemeral("Invalid group selection.")
 
-    coro = _execute_group_upload(interaction, env, job_id, group_id)
+    task = asyncio.create_task(_execute_group_upload(interaction, env, job_id, group_id))
     if ctx is not None and hasattr(ctx, "wait_until"):
-        ctx.wait_until(coro)
-    else:
-        await coro
+        ctx.wait_until(task)
 
     return _deferred_update_message()
-  
+                                           
