@@ -2,8 +2,7 @@ import json
 import re
 from workers import fetch
 
-_TOKEN_RE = re.compile(r"^_\|WARNING:-DO-NOT-SHARE--Sharing-this-[^\s]+$")
-
+_TOKEN_RE = re.compile(r"^_\|WARNING:[^|\s]+\|_[A-Za-z0-9._-]+$")
 
 def _normalize_cookie(raw: str) -> str:
     value = raw.strip()
