@@ -221,18 +221,15 @@ async def _upload_to_roblox_group(
     return True, data
 
 
-async def _edit_message(app_id: str, token: str, content: str, components: list | None = None) -> None:
+async def _send_new_message(app_id: str, token: str, content: str) -> None:
     if not app_id or not token:
         return
-    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}/messages/@original"
-    payload = {"content": content[:1950]}
-    if components is not None:
-        payload["components"] = components
+    url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}"
     await fetch(
         url,
-        method="PATCH",
+        method="POST",
         headers=_DISCORD_HEADERS,
-        body=json.dumps(payload),
+        body=json.dumps({"content": content[:1950]}),
     )
 
 
@@ -282,21 +279,18 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
     token = str(interaction.get("token") or "")
 
     try:
-        await _edit_message(app_id, token, "Uploading audio to Roblox...", components=[])
-
         kv = getattr(env, "UhewBotCookieKV", None)
         if kv is None:
-            await _edit_message(app_id, token, "`UhewBotCookieKV` is not bound.", components=[])
+            await _send_new_message(app_id, token, "`UhewBotCookieKV` is not bound.")
             return
 
         pending_key = f"{_PENDING_PREFIX}{job_id}"
         raw_pending = await kv.get(pending_key)
         if not raw_pending:
-            await _edit_message(
+            await _send_new_message(
                 app_id,
                 token,
                 "This upload prompt expired or was already used. Run `/uploadaudio` again.",
-                components=[],
             )
             return
 
@@ -305,7 +299,7 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
         try:
             pending = json.loads(raw_pending)
         except Exception:
-            await _edit_message(app_id, token, "Failed to read pending upload data.", components=[])
+            await _send_new_message(app_id, token, "Failed to read pending upload data.")
             return
 
         att_url = pending.get("url")
@@ -319,49 +313,41 @@ async def _execute_group_upload(interaction: dict, env, job_id: str, group_id: i
 
         cookie_val, account_label, cookie_err = await _get_first_cookie(env)
         if cookie_err or not cookie_val:
-            await _edit_message(
-                app_id,
-                token,
-                f"Could not get cookie from pool: {cookie_err}",
-                components=[],
-            )
+            await _send_new_message(app_id, token, f"Could not get cookie from pool: {cookie_err}")
             return
 
         raw_bytes, dl_err = await _download_attachment(str(att_url))
         if dl_err or raw_bytes is None:
-            await _edit_message(app_id, token, dl_err or "Failed to download file.", components=[])
+            await _send_new_message(app_id, token, dl_err or "Failed to download file.")
             return
 
         duration = _estimate_duration_seconds(raw_bytes, filename)
         ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
         if not ok:
-            await _edit_message(
+            await _send_new_message(
                 app_id,
                 token,
                 f"Upload to **{group_label}** (`{group_id}`) using **{account_label}** failed:\n{result}",
-                components=[],
             )
             return
 
         asset_id = result.get("Id") if isinstance(result, dict) else None
         if asset_id:
-            await _edit_message(
+            await _send_new_message(
                 app_id,
                 token,
                 f"Uploaded **{audio_name}** to **{group_label}** (`{group_id}`) via **{account_label}**!\n"
                 f"- **Asset ID:** `{asset_id}`\n"
                 f"- **Sound ID:** `rbxassetid://{asset_id}`",
-                components=[],
             )
         else:
-            await _edit_message(
+            await _send_new_message(
                 app_id,
                 token,
                 f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
-                components=[],
             )
     except Exception as exc:
-        await _edit_message(app_id, token, f"Unexpected upload error: `{exc}`", components=[])
+        await _send_new_message(app_id, token, f"Unexpected upload error: `{exc}`")
 
 
 async def handle_component(interaction: dict, env, ctx=None) -> dict:
