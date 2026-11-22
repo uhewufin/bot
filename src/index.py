@@ -1,26 +1,110 @@
+import hashlib
+import hmac
 import importlib
 import json
 from urllib.parse import urlparse
 from workers import Response, WorkerEntrypoint
 
-try:
-    from nacl.signing import VerifyKey
-    from nacl.exceptions import BadSignatureError
-except ImportError:
-    VerifyKey = None
-    BadSignatureError = Exception
+# --- Pure-Python Ed25519 (RFC 8032) verifier for Cloudflare Python Workers ---
+_P = (1 << 255) - 19
+_L = (1 << 252) + 27742317777372353535851937790883648493
+_D = -121665 * pow(121666, -1, _P) % _P
+_I = pow(2, (_P - 1) // 4, _P)
+
+
+def _sha512_int(data: bytes) -> int:
+    return int.from_bytes(hashlib.sha512(data).digest(), "little")
+
+
+def _xrecover(y: int) -> int:
+    xx = (y * y - 1) * pow(_D * y * y + 1, -1, _P) % _P
+    x = pow(xx, (_P + 3) // 8, _P)
+    if (x * x - xx) % _P != 0:
+        x = (x * _I) % _P
+    if x % 2 != 0:
+        x = _P - x
+    return x
+
+
+def _decode_point(s: bytes):
+    if len(s) != 32:
+        return None
+    y = int.from_bytes(s, "little") & ((1 << 255) - 1)
+    if y >= _P:
+        return None
+    x = _xrecover(y)
+    if (x & 1) != ((s[31] >> 7) & 1):
+        x = _P - x
+    if (_D * x * x * y * y - x * x - y * y + 1) % _P != 0:
+        return None
+    return (x % _P, y % _P, 1, (x * y) % _P)
+
+
+def _edwards_add(p1, p2):
+    x1, y1, z1, t1 = p1
+    x2, y2, z2, t2 = p2
+    a = (y1 - x1) * (y2 - x2) % _P
+    b = (y1 + x1) * (y2 + x2) % _P
+    c = t1 * 2 * _D * t2 % _P
+    d = z1 * 2 * z2 % _P
+    e = (b - a) % _P
+    f = (d - c) % _P
+    g = (d + c) % _P
+    h = (b + a) % _P
+    return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
+
+
+def _edwards_mul(p, n: int):
+    q = (0, 1, 1, 0)
+    while n > 0:
+        if n & 1:
+            q = _edwards_add(q, p)
+        p = _edwards_add(p, p)
+        n >>= 1
+    return q
+
+
+def _encode_point(p) -> bytes:
+    x, y, z, _ = p
+    inv_z = pow(z, -1, _P)
+    x = (x * inv_z) % _P
+    y = (y * inv_z) % _P
+    bits = bytearray(y.to_bytes(32, "little"))
+    bits[31] |= (x & 1) << 7
+    return bytes(bits)
+
+
+_B_Y = 4 * pow(5, -1, _P) % _P
+_B = (_xrecover(_B_Y), _B_Y, 1, (_xrecover(_B_Y) * _B_Y) % _P)
+
+
+def _verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    a_pt = _decode_point(public_key)
+    if a_pt is None:
+        return False
+    r_bytes = signature[:32]
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _L:
+        return False
+    r_pt = _decode_point(r_bytes)
+    if r_pt is None:
+        return False
+    h = _sha512_int(r_bytes + public_key + message) % _L
+    lhs = _edwards_mul(_B, s)
+    rhs = _edwards_add(r_pt, _edwards_mul(a_pt, h))
+    return hmac.compare_digest(_encode_point(lhs), _encode_point(rhs))
 
 
 def _verify_discord_signature(raw_body: bytes, signature_hex: str, timestamp: str, public_key_hex: str) -> bool:
     if not signature_hex or not timestamp or not public_key_hex:
         return False
-    if VerifyKey is None:
-        return False
     try:
-        verify_key = VerifyKey(bytes.fromhex(public_key_hex.strip()))
-        verify_key.verify(timestamp.encode("utf-8") + raw_body, bytes.fromhex(signature_hex.strip()))
-        return True
-    except (ValueError, BadSignatureError, Exception):
+        pub = bytes.fromhex(public_key_hex.strip())
+        sig = bytes.fromhex(signature_hex.strip())
+        return _verify_ed25519(pub, timestamp.encode("utf-8") + raw_body, sig)
+    except ValueError:
         return False
 
 
