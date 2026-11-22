@@ -1,193 +1,101 @@
-from __future__ import annotations
-
-import hashlib
-import importlib.util
 import json
-import os
-import re
-from typing import Optional, Tuple
-
+from urllib.parse import urlparse
 from workers import Response, WorkerEntrypoint
+from cmd import addcookie, viewcookies
 
-# Ed25519 parameters from RFC 8032. Keeping verification in the standard
-# library avoids native-extension dependencies in Cloudflare's Pyodide runtime.
-_Q = 2**255 - 19
-_L = 2**252 + 27742317777372353535851937790883648493
-_D = (-121665 * pow(121666, _Q - 2, _Q)) % _Q
-_I = pow(2, (_Q - 1) // 4, _Q)
-_IDENTITY = (0, 1)
-_Point = Tuple[int, int]
-_CMD_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+try:
+    from nacl.signing import VerifyKey
+    from nacl.exceptions import BadSignatureError
+except ImportError:
+    VerifyKey = None
+    BadSignatureError = Exception
 
 
-def _decode_point(encoded: bytes) -> Optional[_Point]:
-    if len(encoded) != 32:
-        return None
-
-    value = int.from_bytes(encoded, "little")
-    sign = value >> 255
-    y = value & ((1 << 255) - 1)
-    if y >= _Q:
-        return None
-
-    y_squared = (y * y) % _Q
-    denominator = (_D * y_squared + 1) % _Q
-    if denominator == 0:
-        return None
-    x_squared = ((y_squared - 1) * pow(denominator, _Q - 2, _Q)) % _Q
-
-    x = pow(x_squared, (_Q + 3) // 8, _Q)
-    if (x * x - x_squared) % _Q != 0:
-        x = (x * _I) % _Q
-    if (x * x - x_squared) % _Q != 0:
-        return None
-    if x == 0 and sign:
-        return None
-    if (x & 1) != sign:
-        x = _Q - x
-
-    return (x, y)
-
-
-def _add_points(left: _Point, right: _Point) -> _Point:
-    x1, y1 = left
-    x2, y2 = right
-    product = (_D * x1 * x2 * y1 * y2) % _Q
-    x_denominator = (1 + product) % _Q
-    y_denominator = (1 - product) % _Q
-    x = ((x1 * y2 + y1 * x2) * pow(x_denominator, _Q - 2, _Q)) % _Q
-    y = ((y1 * y2 + x1 * x2) * pow(y_denominator, _Q - 2, _Q)) % _Q
-    return (x, y)
-
-
-def _multiply_point(scalar: int, point: _Point) -> _Point:
-    result = _IDENTITY
-    addend = point
-    while scalar:
-        if scalar & 1:
-            result = _add_points(result, addend)
-        addend = _add_points(addend, addend)
-        scalar >>= 1
-    return result
-
-
-def _verify_ed25519(public_key_hex: str, signature_hex: str, message: bytes) -> bool:
+def _verify_discord_signature(raw_body: bytes, signature_hex: str, timestamp: str, public_key_hex: str) -> bool:
+    if not signature_hex or not timestamp or not public_key_hex:
+        return False
+    if VerifyKey is None:
+        return False
     try:
-        public_key = bytes.fromhex(public_key_hex)
-        signature = bytes.fromhex(signature_hex)
-    except (TypeError, ValueError):
+        verify_key = VerifyKey(bytes.fromhex(public_key_hex.strip()))
+        verify_key.verify(timestamp.encode("utf-8") + raw_body, bytes.fromhex(signature_hex.strip()))
+        return True
+    except (ValueError, BadSignatureError, Exception):
         return False
 
-    if len(public_key) != 32 or len(signature) != 64:
-        return False
 
-    public_point = _decode_point(public_key)
-    r_point = _decode_point(signature[:32])
-    if public_point is None or r_point is None:
-        return False
-
-    scalar = int.from_bytes(signature[32:], "little")
-    if scalar >= _L:
-        return False
-
-    # Reject points outside the prime-order subgroup.
-    if _multiply_point(_L, public_point) != _IDENTITY:
-        return False
-    if _multiply_point(_L, r_point) != _IDENTITY:
-        return False
-
-    base_point = _decode_point(bytes.fromhex("58" + "66" * 31))
-    if base_point is None:  # Defensive; the constant is defined by RFC 8032.
-        return False
-
-    challenge = int.from_bytes(
-        hashlib.sha512(signature[:32] + public_key + message).digest(), "little"
-    ) % _L
-    return _multiply_point(scalar, base_point) == _add_points(
-        r_point, _multiply_point(challenge, public_point)
+def _json_response(payload: dict, status: int = 200) -> Response:
+    return Response(
+        json.dumps(payload),
+        status=status,
+        headers={"Content-Type": "application/json"},
     )
 
 
-async def _run_command_module(cmd_name: str, message: dict, env) -> Response:
-    if not _CMD_NAME_RE.match(cmd_name):
-        return Response.json(
-            {"type": 4, "data": {"content": f"Invalid command name: `{cmd_name}`"}}
-        )
-
-    cmd_path = os.path.join(os.path.dirname(__file__), "cmd", f"{cmd_name}.py")
-    if not os.path.isfile(cmd_path):
-        return Response.json(
-            {"type": 4, "data": {"content": f"No handler found at `cmd/{cmd_name}.py`."}}
-        )
-
-    spec = importlib.util.spec_from_file_location(f"cmd.{cmd_name}", cmd_path)
-    if spec is None or spec.loader is None:
-        return Response.json(
-            {"type": 4, "data": {"content": f"Failed to load spec for `cmd/{cmd_name}.py`."}}
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    handler = getattr(module, "run", None)
-    if not callable(handler):
-        return Response.json(
-            {
-                "type": 4,
-                "data": {
-                    "content": f"`cmd/{cmd_name}.py` is missing `async def run(message, env)`."
-                },
-            }
-        )
-
-    result = await handler(message, env)
-    if isinstance(result, Response):
-        return result
-    return Response.json(result)
+def _ephemeral(content: str) -> dict:
+    return {
+        "type": 4,
+        "data": {
+            "content": content,
+            "flags": 64,
+        },
+    }
 
 
 class Default(WorkerEntrypoint):
-    async def fetch(self, request):
+    async def on_fetch(self, request):
+        env = self.env
+
         if request.method == "GET":
-            return Response(
-                "Hey, dude. I dont know how you got here but this is where all of "
-                "the bot stuff happens, so bye now.",
-                status=405,
-            )
+            path = urlparse(request.url).path
+            if path in ("/", "/health"):
+                kv_bound = getattr(env, "UhewBotCookieKV", None) is not None
+                pid_set = bool(getattr(env, "PID", "") or "")
+                return _json_response({
+                    "ok": True,
+                    "bot": "uhewbot",
+                    "kv_bound": kv_bound,
+                    "pid_set": pid_set,
+                })
+            return _json_response({"error": "Not found"}, status=404)
 
-        signature = request.headers.get("x-signature-ed25519")
-        timestamp = request.headers.get("x-signature-timestamp")
-        if not signature or not timestamp:
+        if request.method != "POST":
+            return _json_response({"error": "Method not allowed"}, status=405)
+
+        headers = request.headers
+        signature = headers.get("x-signature-ed25519") or ""
+        timestamp = headers.get("x-signature-timestamp") or ""
+        public_key = getattr(env, "PID", "") or ""
+
+        raw_text = await request.text()
+        raw_bytes = raw_text.encode("utf-8")
+
+        if not _verify_discord_signature(raw_bytes, signature, timestamp, public_key):
             return Response("Invalid request signature", status=401)
 
         try:
-            body = (await request.text()).encode("utf-8")
+            interaction = json.loads(raw_text)
         except Exception:
-            return Response("Invalid request body", status=400)
+            return _json_response({"error": "Invalid JSON payload"}, status=400)
 
-        public_key = self.env.PK
-        if not _verify_ed25519(public_key, signature, timestamp.encode("utf-8") + body):
-            return Response("Invalid request signature", status=401)
+        interaction_type = interaction.get("type")
 
-        try:
-            message = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return Response("Invalid JSON", status=400)
+        if interaction_type == 1:
+            return _json_response({"type": 1})
 
-        if not isinstance(message, dict):
-            return Response("Invalid interaction", status=400)
-
-        if message.get("type") == 1:  # Discord PING
-            return Response.json({"type": 1})
-
-        if message.get("type") == 2:  # Discord application command
-            data = message.get("data") or {}
+        if interaction_type == 2:
+            data = interaction.get("data") or {}
             cmd_name = data.get("name")
-            if not isinstance(cmd_name, str):
-                return Response.json(
-                    {"type": 4, "data": {"content": "Missing command name."}}
-                )
-            return await _run_command_module(cmd_name, message, self.env)
 
-        return Response("Unknown", status=404)
+            if cmd_name == "addcookie":
+                result = await addcookie.run(interaction, env)
+                return _json_response(result)
+
+            if cmd_name == "viewcookies":
+                result = await viewcookies.run(interaction, env)
+                return _json_response(result)
+
+            return _json_response(_ephemeral(f"Unknown command: `/{cmd_name}`"))
+
+        return _json_response({"error": "Unsupported interaction type"}, status=400)
         
