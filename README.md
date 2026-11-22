@@ -19,14 +19,12 @@ uvx --from workers-py pywrangler deploy
 For the Cloudflare build's deploy command, use:
 
 ```sh
-rm -f requirements.txt && uvx --from workers-py pywrangler deploy
+uvx --from workers-py pywrangler deploy
 ```
 
-The `rm` removes the legacy requirements file previously used to install
-`workers-py`; current PyWrangler requires dependencies to be declared in
-`pyproject.toml`. The Cloudflare deploy command must use PyWrangler rather than
-calling `npx wrangler deploy` directly, so the Python runtime SDK is synced
-before upload.
+PyWrangler uses `pyproject.toml` and rejects the legacy `requirements.txt`
+format. If you are migrating an existing project, remove `requirements.txt` and
+add project dependencies under `[project].dependencies`.
 
 This endpoint does not use `discord.py`: `discord.py` is a gateway client that
 expects a long-running process and a persistent Discord Gateway connection,
