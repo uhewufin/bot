@@ -1,3 +1,4 @@
+
 import asyncio
 import base64
 import json
@@ -29,7 +30,9 @@ async def _send_message(app_id: str, token: str, content: str) -> None:
     if not app_id or not token:
         print("[button] missing app_id or token, aborting send")
         return
+
     url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}"
+
     try:
         res = await fetch(
             url,
@@ -37,18 +40,23 @@ async def _send_message(app_id: str, token: str, content: str) -> None:
             headers=_DISCORD_HEADERS,
             body=json.dumps({"content": content[:1950]}),
         )
+
         print(f"[button] POST status={res.status}")
+
         if res.status >= 300:
             body = await res.text()
             print(f"[button] POST body={body}")
+
     except Exception as exc:
         print(f"[button] fetch raised: {exc}")
 
 
 def _message(content: str, components: list | None = None) -> dict:
     data = {"content": content[:1950]}
+
     if components is not None:
         data["components"] = components
+
     return {
         "type": 4,
         "data": data,
@@ -57,6 +65,7 @@ def _message(content: str, components: list | None = None) -> dict:
 
 def _parse_groups(env) -> tuple[list[tuple[str, int]], str | None]:
     raw_groups = getattr(env, "groups", None)
+
     if not raw_groups:
         return [], "`groups` environment variable is not set."
 
@@ -69,12 +78,15 @@ def _parse_groups(env) -> tuple[list[tuple[str, int]], str | None]:
         return [], "`groups` must be a non-empty JSON object of `{\"group name\": group_id}`."
 
     groups: list[tuple[str, int]] = []
+
     for name, gid in parsed.items():
         try:
             group_id = int(gid)
         except (TypeError, ValueError):
             return [], f"Invalid group ID for `{name}`: `{gid}`."
+
         label = str(name).strip()
+
         if label:
             groups.append((label[:80], group_id))
 
@@ -90,7 +102,9 @@ def _parse_groups(env) -> tuple[list[tuple[str, int]], str | None]:
 def _extract_options(message: dict) -> dict:
     data = message.get("data") or {}
     options = data.get("options") or []
-    resolved_attachments = ((data.get("resolved") or {}).get("attachments")) or {}
+    resolved_attachments = (
+        (data.get("resolved") or {}).get("attachments")
+    ) or {}
 
     parsed = {
         "attachment": None,
@@ -100,10 +114,13 @@ def _extract_options(message: dict) -> dict:
     for opt in options:
         opt_name = opt.get("name")
         val = opt.get("value")
+
         if opt_name == "file" and val is not None:
             att = resolved_attachments.get(str(val))
+
             if isinstance(att, dict):
                 parsed["attachment"] = att
+
         elif opt_name == "name" and val is not None:
             parsed["name"] = str(val).strip()
 
@@ -112,8 +129,10 @@ def _extract_options(message: dict) -> dict:
 
 def _build_group_buttons(job_id: str, groups: list[tuple[str, int]]) -> list[dict]:
     rows: list[dict] = []
+
     for i in range(0, len(groups), 5):
-        chunk = groups[i : i + 5]
+        chunk = groups[i:i + 5]
+
         components = [
             {
                 "type": 2,
@@ -123,23 +142,32 @@ def _build_group_buttons(job_id: str, groups: list[tuple[str, int]]) -> list[dic
             }
             for group_name, group_id in chunk
         ]
-        rows.append({"type": 1, "components": components})
+
+        rows.append({
+            "type": 1,
+            "components": components,
+        })
+
     return rows
 
 
 def _normalize_cookie(raw: str) -> str:
     value = (raw or "").strip()
+
     if value.startswith(".ROBLOSECURITY="):
-        value = value[len(".ROBLOSECURITY=") :].strip()
+        value = value[len(".ROBLOSECURITY="):].strip()
+
     return value
 
 
 async def _get_first_cookie(env) -> tuple[str | None, str | None, str | None]:
     kv = getattr(env, "UhewBotCookieKV", None)
+
     if kv is None:
         return None, None, "`UhewBotCookieKV` is not bound."
 
     raw = await kv.get(_KV_POOL_KEY)
+
     try:
         pool = json.loads(raw) if raw else []
     except Exception:
@@ -149,15 +177,19 @@ async def _get_first_cookie(env) -> tuple[str | None, str | None, str | None]:
         return None, None, "Cookie pool is empty. Add one with `/addcookie` first."
 
     first = pool[0]
+
     if isinstance(first, dict):
         cookie_val = _normalize_cookie(str(first.get("cookie") or ""))
         label = first.get("username") or str(first.get("user_id") or "Account #1")
+
         if cookie_val:
             return cookie_val, label, None
+
         return None, None, "First entry in `cookie_pool` is missing a `cookie` value."
 
     if isinstance(first, str):
         cookie_val = _normalize_cookie(first)
+
         if cookie_val:
             return cookie_val, "Account #1", None
 
@@ -166,12 +198,14 @@ async def _get_first_cookie(env) -> tuple[str | None, str | None, str | None]:
 
 def _estimate_duration_seconds(raw_bytes: bytes, filename: str) -> float:
     ext = os.path.splitext(filename.lower())[1]
+
     bytes_per_sec = {
         ".mp3": 16000,
         ".ogg": 16000,
         ".wav": 176400,
         ".flac": 100000,
     }.get(ext, 16000)
+
     return round(max(1.0, len(raw_bytes) / bytes_per_sec), 2)
 
 
@@ -179,10 +213,13 @@ async def _response_to_bytes(res) -> bytes:
     if hasattr(res, "bytes"):
         b = await res.bytes()
         return bytes(b)
+
     buf = await res.arrayBuffer()
     py_buf = buf.to_py()
+
     if isinstance(py_buf, (bytes, bytearray, memoryview)):
         return bytes(py_buf)
+
     try:
         from js import Uint8Array
         return bytes(Uint8Array.new(buf).to_py())
@@ -192,14 +229,18 @@ async def _response_to_bytes(res) -> bytes:
 
 async def _download_attachment(url: str) -> tuple[bytes | None, str | None]:
     res = await fetch(url, method="GET")
+
     if res.status != 200:
         return None, f"Failed to download Discord attachment (HTTP {res.status})."
 
     raw_bytes = await _response_to_bytes(res)
+
     if not raw_bytes:
         return None, "Downloaded attachment is empty."
+
     if len(raw_bytes) > _MAX_BYTES:
         return None, f"Audio file exceeds the 20 MB limit ({len(raw_bytes)} bytes)."
+
     return raw_bytes, None
 
 
@@ -210,6 +251,7 @@ async def _upload_to_roblox_group(
     duration_seconds: float,
     group_id: int,
 ) -> tuple[bool, dict | str]:
+
     payload = {
         "name": audio_name[:50],
         "file": base64.b64encode(raw_bytes).decode("utf-8"),
@@ -235,8 +277,10 @@ async def _upload_to_roblox_group(
     )
 
     csrf = res.headers.get("x-csrf-token")
+
     if res.status == 403 and csrf:
         headers["X-CSRF-TOKEN"] = csrf
+
         res = await fetch(
             _PUBLISH_URL,
             method="POST",
@@ -245,6 +289,7 @@ async def _upload_to_roblox_group(
         )
 
     text_body = await res.text()
+
     try:
         data = json.loads(text_body) if text_body else {}
     except Exception:
@@ -258,24 +303,34 @@ async def _upload_to_roblox_group(
 
 async def run(message: dict, env, ctx=None):
     groups, group_err = _parse_groups(env)
+
     if group_err:
         return _message(f"Group config error: {group_err}")
 
     kv = getattr(env, "UhewBotCookieKV", None)
+
     if kv is None:
         return _message("`UhewBotCookieKV` is not bound—cannot store pending upload.")
 
     opts = _extract_options(message)
     attachment = opts["attachment"]
+
     if not attachment:
-        return _message("Missing `file` attachment. Please attach an audio file (`.mp3`, `.ogg`, `.wav`, `.flac`).")
+        return _message(
+            "Missing `file` attachment. Please attach an audio file (`.mp3`, `.ogg`, `.wav`, `.flac`)."
+        )
 
     filename = str(attachment.get("filename") or "audio.mp3")
+
     allowed_exts = (".mp3", ".ogg", ".wav", ".flac")
+
     if not filename.lower().endswith(allowed_exts):
-        return _message(f"Unsupported file type for `{filename}`. Allowed: `{', '.join(allowed_exts)}`.")
+        return _message(
+            f"Unsupported file type for `{filename}`. Allowed: `{', '.join(allowed_exts)}."
+        )
 
     att_url = attachment.get("url")
+
     if not att_url:
         return _message("Attachment did not include a download URL.")
 
@@ -283,13 +338,21 @@ async def run(message: dict, env, ctx=None):
     audio_name = re.sub(r"\s+", " ", base_title).strip() or "Uploaded Audio"
 
     job_id = uuid.uuid4().hex[:16]
+
     pending_data = {
         "url": att_url,
         "filename": filename,
         "name": audio_name,
-        "groups": {name: gid for name, gid in groups},
+        "groups": {
+            name: gid for name, gid in groups
+        },
     }
-    await kv.put(f"{_PENDING_PREFIX}{job_id}", json.dumps(pending_data), expirationTtl=600)
+
+    await kv.put(
+        f"{_PENDING_PREFIX}{job_id}",
+        json.dumps(pending_data),
+        expirationTtl=600,
+    )
 
     return _message(
         f"Select a group to upload **{audio_name}** (`{filename}`) to:",
@@ -297,18 +360,26 @@ async def run(message: dict, env, ctx=None):
     )
 
 
-async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -> None:
+async def _on_button_click(
+    interaction: dict,
+    env,
+    job_id: str,
+    group_id: int,
+) -> None:
+
     app_id = str(interaction.get("application_id") or "")
     token = str(interaction.get("token") or "")
 
     try:
         kv = getattr(env, "UhewBotCookieKV", None)
+
         if kv is None:
             await _send_message(app_id, token, "`UhewBotCookieKV` is not bound.")
             return
 
         pending_key = f"{_PENDING_PREFIX}{job_id}"
         raw_pending = await kv.get(pending_key)
+
         if not raw_pending:
             await _send_message(
                 app_id,
@@ -329,25 +400,52 @@ async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -
         filename = str(pending.get("filename") or "audio.mp3")
         audio_name = str(pending.get("name") or "Uploaded Audio")
         group_map = pending.get("groups") or {}
+
         group_label = next(
-            (g_name for g_name, g_id in group_map.items() if int(g_id) == group_id),
+            (
+                g_name
+                for g_name, g_id in group_map.items()
+                if int(g_id) == group_id
+            ),
             f"Group {group_id}",
         )
 
-        await _send_message(app_id, token, f"Uploading **{audio_name}** to **{group_label}** (`{group_id}`)...")
+        await _send_message(
+            app_id,
+            token,
+            f"Uploading **{audio_name}** to **{group_label}** (`{group_id}`)...",
+        )
 
         cookie_val, account_label, cookie_err = await _get_first_cookie(env)
+
         if cookie_err or not cookie_val:
-            await _send_message(app_id, token, f"Could not get cookie from pool: {cookie_err}")
+            await _send_message(
+                app_id,
+                token,
+                f"Could not get cookie from pool: {cookie_err}",
+            )
             return
 
         raw_bytes, dl_err = await _download_attachment(str(att_url))
+
         if dl_err or raw_bytes is None:
-            await _send_message(app_id, token, dl_err or "Failed to download file.")
+            await _send_message(
+                app_id,
+                token,
+                dl_err or "Failed to download file.",
+            )
             return
 
         duration = _estimate_duration_seconds(raw_bytes, filename)
-        ok, result = await _upload_to_roblox_group(cookie_val, raw_bytes, audio_name, duration, group_id)
+
+        ok, result = await _upload_to_roblox_group(
+            cookie_val,
+            raw_bytes,
+            audio_name,
+            duration,
+            group_id,
+        )
+
         if not ok:
             await _send_message(
                 app_id,
@@ -357,6 +455,7 @@ async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -
             return
 
         asset_id = result.get("Id") if isinstance(result, dict) else None
+
         if asset_id:
             await _send_message(
                 app_id,
@@ -371,37 +470,79 @@ async def _on_button_click(interaction: dict, env, job_id: str, group_id: int) -
                 token,
                 f"Upload to **{group_label}** (`{group_id}`) completed via **{account_label}**: `{json.dumps(result)[:400]}`",
             )
+
     except Exception as exc:
         print(f"[uploadaudio] Exception: {exc}")
-        await _send_message(app_id, token, f"Unexpected upload error: `{exc}`")
+
+        await _send_message(
+            app_id,
+            token,
+            f"Unexpected upload error: `{exc}`",
+        )
 
 
-async def _on_button_click_unknown(interaction: dict, custom_id: str) -> None:
+async def _on_button_click_unknown(
+    interaction: dict,
+    custom_id: str,
+) -> None:
+
     app_id = str(interaction.get("application_id") or "")
     token = str(interaction.get("token") or "")
-    await _send_message(app_id, token, f"Unknown button action: `{custom_id}`")
+
+    await _send_message(
+        app_id,
+        token,
+        f"Unknown button action: `{custom_id}`",
+    )
 
 
-async def handle_component(interaction: dict, env, ctx=None) -> dict:
-    custom_id = str(((interaction.get("data") or {}).get("custom_id")) or "")
-    print(f"[button] handle_component called, ctx={ctx!r}, custom_id={custom_id}")
+async def handle_component(
+    interaction: dict,
+    env,
+    ctx=None,
+) -> dict:
+
+    custom_id = str(
+        ((interaction.get("data") or {}).get("custom_id")) or ""
+    )
+
+    print(
+        f"[button] handle_component called, ctx={ctx!r}, custom_id={custom_id}"
+    )
 
     parts = custom_id.split(":")
+
     if len(parts) != 3 or parts[0] != "uploadaudio_group":
-        await _on_button_click_unknown(interaction, custom_id)
+        _schedule_background(
+            ctx,
+            _on_button_click_unknown(interaction, custom_id),
+        )
+
         return {"type": 6}
 
     job_id = parts[1]
+
     try:
         group_id = int(parts[2])
     except ValueError:
-        await _send_message(
-            str(interaction.get("application_id") or ""),
-            str(interaction.get("token") or ""),
-            "Invalid group selection.",
-        )
-        return {"type": 6}
+        return {
+            "type": 4,
+            "data": {
+                "content": "Invalid group selection.",
+                "flags": 64,
+            },
+        }
 
-    await _on_button_click(interaction, env, job_id, group_id)
+    _schedule_background(
+        ctx,
+        _on_button_click(
+            interaction,
+            env,
+            job_id,
+            group_id,
+        ),
+    )
+
+    # Acknowledge the Discord interaction immediately.
     return {"type": 6}
-    
+        
