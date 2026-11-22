@@ -35,7 +35,7 @@ def _decode_point(s: bytes):
     x = _xrecover(y)
     if (x & 1) != ((s[31] >> 7) & 1):
         x = _P - x
-    if (_D * x * x * y * y - x * x - y * y + 1) % _P != 0:
+    if (-x * x + y * y - 1 - _D * x * x * y * y) % _P != 0:
         return None
     return (x % _P, y % _P, 1, (x * y) % _P)
 
@@ -192,4 +192,3 @@ class Default(WorkerEntrypoint):
             return _json_response(result)
 
         return _json_response({"error": "Unsupported interaction type"}, status=400)
-        
