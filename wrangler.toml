@@ -2,10 +2,15 @@ name = "uhewbot"
 main = "src/index.py"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["python_workers"]
+requires-python = ">=3.13"
+dependencies = ["httpx"]
+
+[dependency-groups]
+dev = ["workers-py", "workers-runtime-sdk"]
 
 [[kv_namespaces]]
 binding = "UhewBotCookieKV"
-id = "081e7d96b23147d988f7679c8566af7d"
+id = "081e7d96b23147d988f7679c8566af7d
 
 [vars]
 PID = "112f5423c3c0af8cd95f31a8f0b99cb0736b9f533c04d3c25e82cecd9373031d"
