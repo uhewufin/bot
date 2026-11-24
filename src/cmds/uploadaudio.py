@@ -8,6 +8,7 @@ import uuid
 from workers import fetch
 
 _KV_POOL_KEY = "cookie_pool"
+_KV_QUARANTINE_KEY = "cookie_quarantine"
 _PENDING_PREFIX = "pending_audio:"
 _PUBLISH_URL = "https://publish.roblox.com/v1/audio"
 _GROUP_JOIN_URL = "https://groups.roblox.com/v1/groups/{}/users"
@@ -29,7 +30,6 @@ _ROBLOX_HEADERS = {
 
 
 def _schedule_background(ctx, coro):
-    # Cloudflare's Python Workers SDK exposes ExecutionContext.waitUntil.
     wait_until = getattr(ctx, "waitUntil", None) if ctx is not None else None
 
     if not callable(wait_until):
@@ -45,8 +45,6 @@ def _schedule_background(ctx, coro):
 
 
 async def _send_message(app_id: str, token: str, content: str):
-    """Edit the deferred Discord response instead of leaving it on Thinking."""
-
     if not app_id or not token:
         print("[uploadaudio] Missing Discord application ID or token.")
         return
@@ -61,9 +59,7 @@ async def _send_message(app_id: str, token: str, content: str):
             url,
             method="PATCH",
             headers=_DISCORD_HEADERS,
-            body=json.dumps({
-                "content": content[:1950],
-            }),
+            body=json.dumps({"content": content[:1950]}),
         )
 
         if res.status >= 300:
@@ -83,10 +79,7 @@ def _message(content: str, components: list | None = None) -> dict:
     if components is not None:
         data["components"] = components
 
-    return {
-        "type": 4,
-        "data": data,
-    }
+    return {"type": 4, "data": data}
 
 
 def _parse_groups(env):
@@ -137,10 +130,7 @@ def _extract_options(message: dict) -> dict:
         (data.get("resolved") or {}).get("attachments")
     ) or {}
 
-    parsed = {
-        "attachment": None,
-        "name": None,
-    }
+    parsed = {"attachment": None, "name": None}
 
     for opt in options:
         opt_name = opt.get("name")
@@ -169,17 +159,12 @@ def _build_group_buttons(job_id, groups):
                 "type": 2,
                 "style": 1,
                 "label": group_name,
-                "custom_id": (
-                    f"uploadaudio_group:{job_id}:{group_id}"
-                ),
+                "custom_id": f"uploadaudio_group:{job_id}:{group_id}",
             }
             for group_name, group_id in chunk
         ]
 
-        rows.append({
-            "type": 1,
-            "components": components,
-        })
+        rows.append({"type": 1, "components": components})
 
     return rows
 
@@ -214,10 +199,7 @@ async def _get_first_cookie(env):
     first = pool[0]
 
     if isinstance(first, dict):
-        cookie_val = _normalize_cookie(
-            str(first.get("cookie") or "")
-        )
-
+        cookie_val = _normalize_cookie(str(first.get("cookie") or ""))
         label = (
             first.get("username")
             or str(first.get("user_id") or "Account #1")
@@ -235,6 +217,90 @@ async def _get_first_cookie(env):
             return cookie_val, "Account #1", None
 
     return None, None, "First cookie pool entry is invalid."
+
+
+def _has_challenge_marker(status: int, data: dict) -> bool:
+    """Conservative challenge detection; ordinary 403s are not enough."""
+    if not isinstance(data, dict):
+        return False
+
+    if data.get("_challenge_detected") is True:
+        return True
+
+    text_value = json.dumps(data).lower()
+
+    markers = (
+        "rblx-challenge-id",
+        "rblx-challenge-type",
+        "rblx-challenge-metadata",
+        "challenge required",
+        "challenge is required",
+        "captcha required",
+        "verification challenge",
+    )
+
+    return any(marker in text_value for marker in markers)
+
+
+async def _quarantine_cookie(
+    env,
+    cookie_val: str,
+    account_label: str,
+    reason: str,
+):
+    """Move a challenged cookie out of the active pool, retaining it for review."""
+    kv = getattr(env, "UhewBotCookieKV", None)
+
+    if kv is None:
+        return False, "KV unavailable; could not quarantine the account."
+
+    pool_raw = await kv.get(_KV_POOL_KEY)
+    quarantine_raw = await kv.get(_KV_QUARANTINE_KEY)
+
+    try:
+        pool = json.loads(pool_raw) if pool_raw else []
+
+        if not isinstance(pool, list):
+            pool = []
+
+    except Exception:
+        return False, "Cookie pool could not be parsed; no changes were made."
+
+    try:
+        quarantine = json.loads(quarantine_raw) if quarantine_raw else []
+
+        if not isinstance(quarantine, list):
+            quarantine = []
+
+    except Exception:
+        quarantine = []
+
+    kept = []
+    removed = False
+
+    for entry in pool:
+        value = entry.get("cookie") if isinstance(entry, dict) else entry
+
+        if _normalize_cookie(str(value or "")) == cookie_val:
+            removed = True
+            continue
+
+        kept.append(entry)
+
+    if not removed:
+        return False, "Account was not found in the active pool."
+
+    quarantine.append({
+        "cookie": cookie_val,
+        "username": str(account_label)[:100],
+        "reason": str(reason)[:500],
+        "status": "CHALLENGED",
+    })
+
+    await kv.put(_KV_POOL_KEY, json.dumps(kept))
+    await kv.put(_KV_QUARANTINE_KEY, json.dumps(quarantine))
+
+    return True, "Account moved to the quarantine list."
 
 
 async def _roblox_request(
@@ -276,12 +342,25 @@ async def _roblox_request(
                 body=request_body,
             )
 
+    challenge_headers = {
+        "challenge_id": res.headers.get("rblx-challenge-id"),
+        "challenge_type": res.headers.get("rblx-challenge-type"),
+        "challenge_metadata": res.headers.get("rblx-challenge-metadata"),
+    }
+
     text_body = await res.text()
 
     try:
         data = json.loads(text_body) if text_body else {}
     except Exception:
         data = {"raw": text_body[:500]}
+
+    if not isinstance(data, dict):
+        data = {"response": data}
+
+    if any(challenge_headers.values()):
+        data["_challenge_detected"] = True
+        data["_challenge_headers"] = challenge_headers
 
     return res.status, data
 
@@ -294,6 +373,10 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             _AUTH_URL,
             cookie_val,
         )
+
+        if _has_challenge_marker(status, account):
+            return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
+
     except Exception as exc:
         return False, f"Could not verify Roblox account: {exc}"
 
@@ -314,6 +397,10 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             _GROUPS_URL.format(user_id),
             cookie_val,
         )
+
+        if _has_challenge_marker(status, memberships):
+            return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
+
     except Exception as exc:
         return False, f"Could not check group membership: {exc}"
 
@@ -350,6 +437,10 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             method="POST",
             body={},
         )
+
+        if _has_challenge_marker(status, join_result):
+            return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
+
     except Exception as exc:
         return False, f"Could not submit group join request: {exc}"
 
@@ -379,6 +470,10 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             _GROUPS_URL.format(user_id),
             cookie_val,
         )
+
+        if _has_challenge_marker(verify_status, verify_data):
+            return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
+
     except Exception as exc:
         return False, (
             f"Roblox accepted the join request, but membership "
@@ -485,6 +580,9 @@ async def _upload_to_roblox_group(
         body=payload,
     )
 
+    if _has_challenge_marker(status, data):
+        return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
+
     if status < 200 or status >= 300:
         return False, (
             f"Roblox upload failed (HTTP {status}): "
@@ -529,7 +627,6 @@ async def run(message: dict, env, ctx=None):
         return _message("Attachment did not include a download URL.")
 
     base_title = opts["name"] or os.path.splitext(filename)[0]
-
     audio_name = (
         re.sub(r"\s+", " ", base_title).strip()
         or "Uploaded Audio"
@@ -572,10 +669,7 @@ async def _on_button_click(
         kv = getattr(env, "UhewBotCookieKV", None)
 
         if kv is None:
-            await _send_message(
-                app_id, token,
-                "`UhewBotCookieKV` is not bound.",
-            )
+            await _send_message(app_id, token, "`UhewBotCookieKV` is not bound.")
             return
 
         pending_key = f"{_PENDING_PREFIX}{job_id}"
@@ -583,7 +677,8 @@ async def _on_button_click(
 
         if not raw_pending:
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 "This upload prompt expired or was already used. "
                 "Run `/uploadaudio` again.",
             )
@@ -594,10 +689,7 @@ async def _on_button_click(
         try:
             pending = json.loads(raw_pending)
         except Exception:
-            await _send_message(
-                app_id, token,
-                "Failed to read pending upload data.",
-            )
+            await _send_message(app_id, token, "Failed to read pending upload data.")
             return
 
         att_url = pending.get("url")
@@ -614,29 +706,27 @@ async def _on_button_click(
             f"Group {group_id}",
         )
 
-        if not any(
-            int(gid) == group_id
-            for gid in group_map.values()
-        ):
+        if not any(int(gid) == group_id for gid in group_map.values()):
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 "That group wasn't part of this upload prompt.",
             )
             return
 
         await _send_message(
-            app_id, token,
+            app_id,
+            token,
             f"Checking account and group membership for "
             f"**{group_label}** (`{group_id}`)...",
         )
 
-        cookie_val, account_label, cookie_err = (
-            await _get_first_cookie(env)
-        )
+        cookie_val, account_label, cookie_err = await _get_first_cookie(env)
 
         if cookie_err or not cookie_val:
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 f"Could not get cookie from pool: {cookie_err}",
             )
             return
@@ -647,37 +737,51 @@ async def _on_button_click(
         )
 
         if not joined:
-            await _send_message(
-                app_id, token,
-                f"Group membership check failed for "
-                f"**{account_label}**:\n{membership_msg}",
-            )
+            if str(membership_msg).startswith("CHALLENGE_DETECTED:"):
+                moved, quarantine_msg = await _quarantine_cookie(
+                    env,
+                    cookie_val,
+                    account_label,
+                    membership_msg,
+                )
+
+                await _send_message(
+                    app_id,
+                    token,
+                    f"Roblox challenged **{account_label}**. "
+                    f"{quarantine_msg} The account was removed from "
+                    "the active pool. This upload was stopped.",
+                )
+            else:
+                await _send_message(
+                    app_id,
+                    token,
+                    f"Group membership check failed for "
+                    f"**{account_label}**:\n{membership_msg}",
+                )
             return
 
         await _send_message(
-            app_id, token,
-            f"{membership_msg}\n"
-            f"Downloading **{audio_name}**...",
+            app_id,
+            token,
+            f"{membership_msg}\nDownloading **{audio_name}**...",
         )
 
-        raw_bytes, dl_err = await _download_attachment(
-            str(att_url)
-        )
+        raw_bytes, dl_err = await _download_attachment(str(att_url))
 
         if dl_err or raw_bytes is None:
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 dl_err or "Failed to download file.",
             )
             return
 
-        duration = _estimate_duration_seconds(
-            raw_bytes,
-            filename,
-        )
+        duration = _estimate_duration_seconds(raw_bytes, filename)
 
         await _send_message(
-            app_id, token,
+            app_id,
+            token,
             f"Uploading **{audio_name}** to **{group_label}** "
             f"using **{account_label}**...",
         )
@@ -691,11 +795,29 @@ async def _on_button_click(
         )
 
         if not ok:
-            await _send_message(
-                app_id, token,
-                f"Upload to **{group_label}** (`{group_id}`) "
-                f"using **{account_label}** failed:\n{result}",
-            )
+            if str(result).startswith("CHALLENGE_DETECTED:"):
+                moved, quarantine_msg = await _quarantine_cookie(
+                    env,
+                    cookie_val,
+                    account_label,
+                    result,
+                )
+
+                await _send_message(
+                    app_id,
+                    token,
+                    f"Roblox challenged **{account_label}** during upload. "
+                    f"{quarantine_msg} The account was removed from the "
+                    "active pool. The upload was stopped and not retried "
+                    "with another account.",
+                )
+            else:
+                await _send_message(
+                    app_id,
+                    token,
+                    f"Upload to **{group_label}** (`{group_id}`) "
+                    f"using **{account_label}** failed:\n{result}",
+                )
             return
 
         asset_id = (
@@ -706,7 +828,8 @@ async def _on_button_click(
 
         if asset_id:
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 f"Uploaded **{audio_name}** to **{group_label}** "
                 f"(`{group_id}`) via **{account_label}**!\n"
                 f"- **Asset ID:** `{asset_id}`\n"
@@ -714,7 +837,8 @@ async def _on_button_click(
             )
         else:
             await _send_message(
-                app_id, token,
+                app_id,
+                token,
                 f"Upload request completed, but Roblox did not return "
                 f"an asset ID:\n`{json.dumps(result)[:500]}`",
             )
@@ -723,7 +847,8 @@ async def _on_button_click(
         print(f"[uploadaudio] Exception: {exc}")
 
         await _send_message(
-            app_id, token,
+            app_id,
+            token,
             f"Unexpected upload error: `{str(exc)[:500]}`",
         )
 
