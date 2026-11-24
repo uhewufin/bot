@@ -1,45 +1,77 @@
+
 import json
 
 _KV_POOL_KEY = "cookie_pool"
 
 
-def _ephemeral(content: str) -> dict:
+def _reply(content: str) -> dict:
+    """Return a public Discord interaction response."""
     return {
         "type": 4,
         "data": {
             "content": content,
-            "flags": 64,
         },
     }
 
 
 async def run(message: dict, env):
     kv = getattr(env, "UhewBotCookieKV", None)
-    if kv is None:
-        return _ephemeral("`UhewBotCookieKV` is not bound—cannot read cookie pool.")
 
-    raw = await kv.get(_KV_POOL_KEY)
+    if kv is None:
+        return _reply("`UhewBotCookieKV` is not bound.")
+
     try:
-        pool = json.loads(raw) if raw else []
-        if not isinstance(pool, list):
-            pool = []
+        raw_pool = await kv.get(_KV_POOL_KEY)
+    except Exception as exc:
+        return _reply(
+            f"Failed to read the cookie pool: `{str(exc)[:300]}`"
+        )
+
+    try:
+        pool = json.loads(raw_pool) if raw_pool else []
     except Exception:
-        return _ephemeral("Failed to parse `cookie_pool` from KV.")
+        return _reply("Failed to parse `cookie_pool` from KV.")
+
+    if not isinstance(pool, list):
+        return _reply("`cookie_pool` has an invalid format.")
 
     if not pool:
-        return _ephemeral("Cookie pool is currently empty. Use `/addcookie` to add one.")
+        return _reply(
+            "No accounts are currently stored.\n"
+            "Use `/addcookie` to add one."
+        )
 
-    lines = [f"**Cookie Pool ({len(pool)} account{'s' if len(pool) != 1 else ''}):**"]
-    for i, entry in enumerate(pool, start=1):
+    lines = []
+
+    for index, entry in enumerate(pool, start=1):
         if isinstance(entry, dict):
-            username = entry.get("username") or "Unknown"
-            user_id = entry.get("user_id")
-            if user_id:
-                lines.append(f"{i}. **{username}** (`{user_id}`)")
-            else:
-                lines.append(f"{i}. **{username}**")
-        else:
-            lines.append(f"{i}. *Legacy entry (no username)*")
+            username = (
+                entry.get("username")
+                or entry.get("user_id")
+                or f"Account #{index}"
+            )
+            cookie = str(entry.get("cookie") or "").strip()
 
-    return _ephemeral("\n".join(lines))
+        elif isinstance(entry, str):
+            username = f"Account #{index}"
+            cookie = entry.strip()
+
+        else:
+            username = f"Account #{index}"
+            cookie = ""
+
+        if cookie:
+            lines.append(f"`{index}.` **{username}**")
+        else:
+            lines.append(
+                f"`{index}.` **{username}** — Missing cookie"
+            )
+
+    content = (
+        "**Stored Roblox Accounts**\n"
+        + "\n".join(lines)
+        + f"\n\n**Total:** {len(pool)} account(s)"
+    )
+
+    return _reply(content)
     
