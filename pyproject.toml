@@ -3,7 +3,8 @@ name = "bot"
 version = "0.1.0"
 description = "Discord interactions bot running as a Cloudflare Python Worker"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["httpx"]
+
 
 [dependency-groups]
 dev = [
