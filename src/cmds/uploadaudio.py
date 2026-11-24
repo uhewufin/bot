@@ -1,4 +1,3 @@
-
 import asyncio
 import base64
 import json
@@ -519,11 +518,6 @@ async def handle_component(interaction: dict, env, ctx=None):
         ((interaction.get("data") or {}).get("custom_id")) or ""
     )
 
-    print(
-        f"[button] handle_component called, "
-        f"ctx={ctx!r}, custom_id={custom_id}"
-    )
-
     parts = custom_id.split(":")
 
     if len(parts) != 3 or parts[0] != "uploadaudio_group":
@@ -550,8 +544,6 @@ async def handle_component(interaction: dict, env, ctx=None):
 
         return {"type": 6}
 
-    # Acknowledge Discord immediately. The actual upload runs in the
-    # background so it cannot delay the interaction response.
     _schedule_background(
         ctx,
         _on_button_click(
