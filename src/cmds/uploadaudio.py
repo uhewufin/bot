@@ -1,5 +1,4 @@
 
-import asyncio
 import base64
 import json
 import os
@@ -30,11 +29,19 @@ _ROBLOX_HEADERS = {
 
 
 def _schedule_background(ctx, coro):
-    if ctx is not None and hasattr(ctx, "wait_until"):
-        ctx.wait_until(coro)
-        return
+    # Cloudflare's Python Workers SDK exposes ExecutionContext.waitUntil.
+    wait_until = getattr(ctx, "waitUntil", None) if ctx is not None else None
 
-    asyncio.ensure_future(coro)
+    if not callable(wait_until):
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(
+            "Cloudflare ExecutionContext.waitUntil is unavailable; "
+            "background upload was not started."
+        )
+
+    wait_until(coro)
 
 
 async def _send_message(app_id: str, token: str, content: str):
@@ -280,12 +287,8 @@ async def _roblox_request(
 
 
 async def _ensure_group_membership(cookie_val: str, group_id: int):
-    """
-    Verify the authenticated account's membership.
-    If it is not a member, attempt to join the group.
-    """
+    """Check membership and attempt to join if necessary."""
 
-    # Identify the account represented by this cookie.
     try:
         status, account = await _roblox_request(
             _AUTH_URL,
@@ -306,7 +309,6 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
     if not user_id:
         return False, "Roblox did not return an authenticated account ID."
 
-    # Check the account's group memberships.
     try:
         status, memberships = await _roblox_request(
             _GROUPS_URL.format(user_id),
@@ -341,7 +343,6 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
                 f"of group `{group_id}`."
             )
 
-    # Not a member: attempt to join.
     try:
         status, join_result = await _roblox_request(
             _GROUP_JOIN_URL.format(group_id),
@@ -373,7 +374,6 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             f"`{detail}`"
         )
 
-    # Verify that membership is now visible.
     try:
         verify_status, verify_data = await _roblox_request(
             _GROUPS_URL.format(user_id),
@@ -614,7 +614,6 @@ async def _on_button_click(
             f"Group {group_id}",
         )
 
-        # Validate that the selected group was part of this prompt.
         if not any(
             int(gid) == group_id
             for gid in group_map.values()
@@ -642,7 +641,6 @@ async def _on_button_click(
             )
             return
 
-        # Check membership and join if necessary.
         joined, membership_msg = await _ensure_group_membership(
             cookie_val,
             group_id,
@@ -786,8 +784,6 @@ async def handle_component(
             },
         }
 
-    # Discord acknowledges immediately; background work edits
-    # this original response as it progresses.
     return {
         "type": 5,
         "data": {
