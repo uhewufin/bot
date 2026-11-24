@@ -1,3 +1,4 @@
+
 import asyncio
 import base64
 import json
@@ -22,12 +23,15 @@ _DISCORD_HEADERS = {
 def _schedule_background(ctx, coro):
     if ctx is not None and hasattr(ctx, "wait_until"):
         ctx.wait_until(coro)
-    else:
-        asyncio.ensure_future(coro)
+        return
+
+    # Fallback for environments without wait_until.
+    asyncio.ensure_future(coro)
 
 
 async def _send_message(app_id: str, token: str, content: str):
     if not app_id or not token:
+        print("[uploadaudio] Missing Discord application ID or token.")
         return
 
     url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}"
@@ -42,13 +46,13 @@ async def _send_message(app_id: str, token: str, content: str):
 
         if res.status >= 300:
             body = await res.text()
-            print(f"[button] Discord webhook error {res.status}: {body}")
+            print(f"[uploadaudio] Discord follow-up failed: {res.status} {body}")
 
     except Exception as exc:
-        print(f"[button] Discord webhook exception: {exc}")
+        print(f"[uploadaudio] Discord follow-up exception: {exc}")
 
 
-def _message(content: str, components=None):
+def _message(content: str, components: list | None = None) -> dict:
     data = {"content": content[:1950]}
 
     if components is not None:
@@ -60,7 +64,7 @@ def _message(content: str, components=None):
     }
 
 
-def _parse_groups(env):
+def _parse_groups(env) -> tuple[list[tuple[str, int]], str | None]:
     raw_groups = getattr(env, "groups", None)
 
     if not raw_groups:
@@ -72,7 +76,7 @@ def _parse_groups(env):
         return [], "Failed to parse `groups` environment variable as JSON."
 
     if not isinstance(parsed, dict) or not parsed:
-        return [], "`groups` must be a non-empty JSON object."
+        return [], "`groups` must be a non-empty JSON object of group names and IDs."
 
     groups = []
 
@@ -96,13 +100,13 @@ def _parse_groups(env):
     return groups, None
 
 
-def _extract_options(message: dict):
+def _extract_options(message: dict) -> dict:
     data = message.get("data") or {}
     options = data.get("options") or []
 
     resolved_attachments = (
-        (data.get("resolved") or {}).get("attachments") or {}
-    )
+        (data.get("resolved") or {}).get("attachments")
+    ) or {}
 
     parsed = {
         "attachment": None,
@@ -125,7 +129,11 @@ def _extract_options(message: dict):
     return parsed
 
 
-def _build_group_buttons(job_id: str, groups):
+def _build_group_buttons(
+    job_id: str,
+    groups: list[tuple[str, int]]
+) -> list[dict]:
+
     rows = []
 
     for i in range(0, len(groups), 5):
@@ -149,7 +157,7 @@ def _build_group_buttons(job_id: str, groups):
     return rows
 
 
-def _normalize_cookie(raw: str):
+def _normalize_cookie(raw: str) -> str:
     value = (raw or "").strip()
 
     if value.startswith(".ROBLOSECURITY="):
@@ -178,14 +186,16 @@ async def _get_first_cookie(env):
 
     if isinstance(first, dict):
         cookie_val = _normalize_cookie(str(first.get("cookie") or ""))
-        label = first.get("username") or str(
-            first.get("user_id") or "Account #1"
+
+        label = (
+            first.get("username")
+            or str(first.get("user_id") or "Account #1")
         )
 
         if cookie_val:
             return cookie_val, label, None
 
-        return None, None, "First entry in `cookie_pool` is missing a cookie."
+        return None, None, "First cookie pool entry is missing its cookie value."
 
     if isinstance(first, str):
         cookie_val = _normalize_cookie(first)
@@ -196,7 +206,7 @@ async def _get_first_cookie(env):
     return None, None, "First entry in `cookie_pool` is invalid."
 
 
-def _estimate_duration_seconds(raw_bytes: bytes, filename: str):
+def _estimate_duration_seconds(raw_bytes: bytes, filename: str) -> float:
     ext = os.path.splitext(filename.lower())[1]
 
     bytes_per_sec = {
@@ -209,7 +219,7 @@ def _estimate_duration_seconds(raw_bytes: bytes, filename: str):
     return round(max(1.0, len(raw_bytes) / bytes_per_sec), 2)
 
 
-async def _response_to_bytes(res):
+async def _response_to_bytes(res) -> bytes:
     if hasattr(res, "bytes"):
         b = await res.bytes()
         return bytes(b)
@@ -239,7 +249,7 @@ async def _download_attachment(url: str):
         return None, "Downloaded attachment is empty."
 
     if len(raw_bytes) > _MAX_BYTES:
-        return None, "Audio file exceeds the 20 MB limit."
+        return None, f"Audio file exceeds the 20 MB limit ({len(raw_bytes)} bytes)."
 
     return raw_bytes, None
 
@@ -312,9 +322,7 @@ async def run(message: dict, env, ctx=None):
     kv = getattr(env, "UhewBotCookieKV", None)
 
     if kv is None:
-        return _message(
-            "`UhewBotCookieKV` is not bound—cannot store pending upload."
-        )
+        return _message("`UhewBotCookieKV` is not bound.")
 
     opts = _extract_options(message)
     attachment = opts["attachment"]
@@ -343,7 +351,8 @@ async def run(message: dict, env, ctx=None):
     base_title = opts["name"] or os.path.splitext(filename)[0]
 
     audio_name = (
-        re.sub(r"\s+", " ", base_title).strip() or "Uploaded Audio"
+        re.sub(r"\s+", " ", base_title).strip()
+        or "Uploaded Audio"
     )
 
     job_id = uuid.uuid4().hex[:16]
@@ -353,7 +362,8 @@ async def run(message: dict, env, ctx=None):
         "filename": filename,
         "name": audio_name,
         "groups": {
-            name: gid for name, gid in groups
+            name: gid
+            for name, gid in groups
         },
     }
 
@@ -383,7 +393,9 @@ async def _on_button_click(
 
         if kv is None:
             await _send_message(
-                app_id, token, "`UhewBotCookieKV` is not bound."
+                app_id,
+                token,
+                "`UhewBotCookieKV` is not bound.",
             )
             return
 
@@ -405,21 +417,22 @@ async def _on_button_click(
             pending = json.loads(raw_pending)
         except Exception:
             await _send_message(
-                app_id, token, "Failed to read pending upload data."
+                app_id,
+                token,
+                "Failed to read pending upload data.",
             )
             return
 
         att_url = pending.get("url")
         filename = str(pending.get("filename") or "audio.mp3")
         audio_name = str(pending.get("name") or "Uploaded Audio")
-
         group_map = pending.get("groups") or {}
 
         group_label = next(
             (
-                g_name
-                for g_name, g_id in group_map.items()
-                if int(g_id) == group_id
+                name
+                for name, gid in group_map.items()
+                if int(gid) == group_id
             ),
             f"Group {group_id}",
         )
@@ -431,9 +444,7 @@ async def _on_button_click(
             f"(`{group_id}`)...",
         )
 
-        cookie_val, account_label, cookie_err = (
-            await _get_first_cookie(env)
-        )
+        cookie_val, account_label, cookie_err = await _get_first_cookie(env)
 
         if cookie_err or not cookie_val:
             await _send_message(
@@ -487,9 +498,8 @@ async def _on_button_click(
             await _send_message(
                 app_id,
                 token,
-                f"Upload to **{group_label}** (`{group_id}`) "
-                f"completed via **{account_label}**: "
-                f"`{json.dumps(result)[:400]}`",
+                f"Upload to **{group_label}** (`{group_id}`) completed "
+                f"via **{account_label}**: `{json.dumps(result)[:400]}`",
             )
 
     except Exception as exc:
@@ -502,18 +512,12 @@ async def _on_button_click(
         )
 
 
-async def _on_button_click_unknown(interaction: dict, custom_id: str):
-    app_id = str(interaction.get("application_id") or "")
-    token = str(interaction.get("token") or "")
+async def handle_component(
+    interaction: dict,
+    env,
+    ctx=None,
+) -> dict:
 
-    await _send_message(
-        app_id,
-        token,
-        f"Unknown button action: `{custom_id}`",
-    )
-
-
-async def handle_component(interaction: dict, env, ctx=None):
     custom_id = str(
         ((interaction.get("data") or {}).get("custom_id")) or ""
     )
@@ -521,38 +525,56 @@ async def handle_component(interaction: dict, env, ctx=None):
     parts = custom_id.split(":")
 
     if len(parts) != 3 or parts[0] != "uploadaudio_group":
-        _schedule_background(
-            ctx,
-            _on_button_click_unknown(interaction, custom_id),
-        )
-
-        return {"type": 6}
+        return {
+            "type": 4,
+            "data": {
+                "content": "Invalid upload button.",
+                "flags": 64,
+            },
+        }
 
     job_id = parts[1]
 
     try:
         group_id = int(parts[2])
-    except ValueError:
+    except (TypeError, ValueError):
+        return {
+            "type": 4,
+            "data": {
+                "content": "Invalid group ID.",
+                "flags": 64,
+            },
+        }
+
+    # Schedule the actual upload without blocking Discord's acknowledgement.
+    try:
         _schedule_background(
             ctx,
-            _send_message(
-                str(interaction.get("application_id") or ""),
-                str(interaction.get("token") or ""),
-                "Invalid group selection.",
+            _on_button_click(
+                interaction,
+                env,
+                job_id,
+                group_id,
             ),
         )
 
-        return {"type": 6}
+    except Exception as exc:
+        print(f"[uploadaudio] Failed to schedule upload: {exc}")
 
-    _schedule_background(
-        ctx,
-        _on_button_click(
-            interaction,
-            env,
-            job_id,
-            group_id,
-        ),
-    )
+        return {
+            "type": 4,
+            "data": {
+                "content": f"Could not start upload: `{exc}`",
+                "flags": 64,
+            },
+        }
 
-    return {"type": 6}
-        
+    # Type 5 = deferred channel message response.
+    # Flag 64 keeps the eventual response ephemeral.
+    return {
+        "type": 5,
+        "data": {
+            "flags": 64,
+        },
+    }
+                
