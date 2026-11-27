@@ -3,7 +3,7 @@ import os
 import re
 import uuid
 
-from js import Blob, File, FormData
+from js import Blob, FormData
 from pyodide.ffi import to_js
 from workers import fetch
 
@@ -502,19 +502,6 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
     )
 
 
-def _estimate_duration_seconds(raw_bytes: bytes, filename: str) -> float:
-    ext = os.path.splitext(filename.lower())[1]
-
-    bytes_per_sec = {
-        ".mp3": 16000,
-        ".ogg": 16000,
-        ".wav": 176400,
-        ".flac": 100000,
-    }.get(ext, 16000)
-
-    return round(max(1.0, len(raw_bytes) / bytes_per_sec), 2)
-
-
 async def _response_to_bytes(res) -> bytes:
     if hasattr(res, "bytes"):
         b = await res.bytes()
@@ -577,23 +564,36 @@ async def _upload_to_roblox_group(
         separators=(",", ":"),
     )
 
-    form_data = FormData.new()
-    file_blob = Blob.new(to_js([raw_bytes]), to_js({"type": "application/octet-stream"}))
-    request_blob = Blob.new(to_js([request_json]), to_js({"type": "application/json"}))
-    form_data.append("fileContent", file_blob, safe_filename)
-    form_data.append("request", request_blob, "request.json")
-
     headers = {
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
     }
 
+    def _build_body():
+        form_data = FormData.new()
+        file_blob = Blob.new(to_js([raw_bytes]), to_js({"type": "application/octet-stream"}))
+        request_blob = Blob.new(to_js([request_json]), to_js({"type": "application/json"}))
+        form_data.append("fileContent", file_blob, safe_filename)
+        form_data.append("request", request_blob, "request.json")
+        return form_data
+
     res = await fetch(
         _ASSET_UPLOAD_URL,
         method="POST",
         headers=headers,
-        body=form_data,
+        body=_build_body(),
     )
+
+    if res.status == 403:
+        csrf = res.headers.get("x-csrf-token")
+        if csrf:
+            headers["x-csrf-token"] = csrf
+            res = await fetch(
+                _ASSET_UPLOAD_URL,
+                method="POST",
+                headers=headers,
+                body=_build_body(),
+            )
 
     challenge_headers = {
         "challenge_id": res.headers.get("rblx-challenge-id"),
