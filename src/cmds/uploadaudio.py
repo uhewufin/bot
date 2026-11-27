@@ -542,6 +542,19 @@ async def _download_attachment(url: str):
     return raw_bytes, None
 
 
+def _audio_mime_type(filename: str) -> str:
+    lower = (filename or "").lower()
+    if lower.endswith(".mp3"):
+        return "audio/mpeg"
+    if lower.endswith(".ogg"):
+        return "audio/ogg"
+    if lower.endswith(".wav"):
+        return "audio/wav"
+    if lower.endswith(".flac"):
+        return "audio/flac"
+    return "application/octet-stream"
+
+
 def _build_multipart_body(
     request_json: str,
     raw_bytes: bytes,
@@ -549,21 +562,21 @@ def _build_multipart_body(
 ) -> tuple[bytes, str]:
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
     crlf = b"\r\n"
+    mime_type = _audio_mime_type(filename)
 
     parts = [
-        f"--{boundary}".encode("utf-8"),
-        b'Content-Disposition: form-data; name="request"; filename="request.json"',
-        b"Content-Type: application/json",
-        b"",
-        request_json.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         (
             f'Content-Disposition: form-data; name="fileContent"; '
             f'filename="{filename}"'
         ).encode("utf-8"),
-        b"Content-Type: application/octet-stream",
+        f"Content-Type: {mime_type}".encode("utf-8"),
         b"",
         raw_bytes,
+        f"--{boundary}".encode("utf-8"),
+        b'Content-Disposition: form-data; name="request"',
+        b"",
+        request_json.encode("utf-8"),
         f"--{boundary}--".encode("utf-8"),
         b"",
     ]
@@ -605,7 +618,6 @@ async def _upload_to_roblox_group(
             "assetType": "Audio",
             "creationContext": {
                 "creator": {"groupId": group_id},
-                "expectedPrice": 0,
             },
         },
         separators=(",", ":"),
