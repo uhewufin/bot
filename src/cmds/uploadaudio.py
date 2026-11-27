@@ -3,7 +3,7 @@ import os
 import re
 import uuid
 
-from js import Response, Uint8Array, fetch as js_fetch
+from js import Blob, Headers, Request, Uint8Array, fetch as js_fetch
 from pyodide.ffi import to_js
 from workers import fetch
 
@@ -26,6 +26,16 @@ _DISCORD_HEADERS = {
 _ROBLOX_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "Roblox/WinInet",
+}
+
+_CREATOR_UPLOAD_HEADERS = {
+    "Accept": "*/*",
+    "Origin": "https://create.roblox.com",
+    "Referer": "https://create.roblox.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    ),
 }
 
 
@@ -586,21 +596,32 @@ def _build_multipart_body(
     return body_bytes, content_type
 
 
-def _make_js_uint8_array(data_bytes: bytes):
+def _make_js_blob(data_bytes: bytes, mime_type: str):
     arr = Uint8Array.new(len(data_bytes))
     arr.set(to_js(list(data_bytes)))
-    return arr
+    return Blob.new(to_js([arr]), to_js({"type": mime_type}))
 
 
-async def _do_js_upload(url: str, headers_dict: dict, body_bytes: bytes):
-    js_arr = _make_js_uint8_array(body_bytes)
-    js_resp_body = Response.new(js_arr).body
-    init = to_js({
-        "method": "POST",
-        "headers": headers_dict,
-        "body": js_resp_body,
-    })
-    return await js_fetch(url, init)
+async def _do_js_upload(
+    url: str,
+    headers_dict: dict,
+    body_bytes: bytes,
+    content_type: str,
+):
+    js_headers = Headers.new()
+    for k, v in headers_dict.items():
+        js_headers.set(k, v)
+
+    blob = _make_js_blob(body_bytes, content_type)
+    req = Request.new(
+        url,
+        to_js({
+            "method": "POST",
+            "headers": js_headers,
+            "body": blob,
+        }),
+    )
+    return await js_fetch(req)
 
 
 async def _upload_to_roblox_group(
@@ -632,18 +653,23 @@ async def _upload_to_roblox_group(
     print(f"[uploadaudio] multipart body bytes: {len(body_bytes)}")
 
     headers = {
-        **_ROBLOX_HEADERS,
+        **_CREATOR_UPLOAD_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
     }
 
-    res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes)
+    res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes, content_type)
 
     if res.status == 403:
         csrf = res.headers.get("x-csrf-token")
         if csrf:
             headers["x-csrf-token"] = csrf
-            res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes)
+            res = await _do_js_upload(
+                _ASSET_UPLOAD_URL,
+                headers,
+                body_bytes,
+                content_type,
+            )
 
     challenge_headers = {
         "challenge_id": res.headers.get("rblx-challenge-id"),
