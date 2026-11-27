@@ -3,8 +3,7 @@ import os
 import re
 import uuid
 
-from js import Blob, FormData, Uint8Array
-from pyodide.ffi import to_js
+from js import Uint8Array
 from workers import fetch
 
 _KV_POOL_KEY = "cookie_pool"
@@ -548,6 +547,37 @@ def _bytes_to_js_uint8_array(raw_bytes: bytes):
     return arr
 
 
+def _build_multipart_body(
+    request_json: str,
+    raw_bytes: bytes,
+    filename: str,
+) -> tuple[bytes, str]:
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+    crlf = b"\r\n"
+
+    parts = [
+        f"--{boundary}".encode("utf-8"),
+        b'Content-Disposition: form-data; name="request"; filename="request.json"',
+        b"Content-Type: application/json",
+        b"",
+        request_json.encode("utf-8"),
+        f"--{boundary}".encode("utf-8"),
+        (
+            f'Content-Disposition: form-data; name="fileContent"; '
+            f'filename="{filename}"'
+        ).encode("utf-8"),
+        b"Content-Type: application/octet-stream",
+        b"",
+        raw_bytes,
+        f"--{boundary}--".encode("utf-8"),
+        b"",
+    ]
+
+    body_bytes = crlf.join(parts)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body_bytes, content_type
+
+
 async def _upload_to_roblox_group(
     cookie_val: str,
     raw_bytes: bytes,
@@ -569,25 +599,25 @@ async def _upload_to_roblox_group(
         separators=(",", ":"),
     )
 
+    body_bytes, content_type = _build_multipart_body(
+        request_json,
+        raw_bytes,
+        safe_filename,
+    )
+
     headers = {
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
+        "Content-Type": content_type,
     }
 
-    def _build_body():
-        form_data = FormData.new()
-        js_bytes = _bytes_to_js_uint8_array(raw_bytes)
-        file_blob = Blob.new(to_js([js_bytes]), to_js({"type": "application/octet-stream"}))
-        request_blob = Blob.new(to_js([request_json]), to_js({"type": "application/json"}))
-        form_data.append("fileContent", file_blob, safe_filename)
-        form_data.append("request", request_blob, "request.json")
-        return form_data
+    js_body = _bytes_to_js_uint8_array(body_bytes)
 
     res = await fetch(
         _ASSET_UPLOAD_URL,
         method="POST",
         headers=headers,
-        body=_build_body(),
+        body=js_body,
     )
 
     if res.status == 403:
@@ -598,7 +628,7 @@ async def _upload_to_roblox_group(
                 _ASSET_UPLOAD_URL,
                 method="POST",
                 headers=headers,
-                body=_build_body(),
+                body=js_body,
             )
 
     challenge_headers = {
@@ -846,8 +876,8 @@ async def _on_button_click(
                     app_id,
                     token,
                     f"Roblox challenged **{account_label}** during upload. "
-                    f"{quarantine_msg} The account was removed from the "
-                    "active pool. The upload was stopped and not retried "
+                    f"{quarantine_msg} The account was removed from "
+                    "the active pool. The upload was stopped and not retried "
                     "with another account.",
                 )
             else:
