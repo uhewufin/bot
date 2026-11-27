@@ -3,7 +3,7 @@ import os
 import re
 import uuid
 
-from js import Uint8Array
+from js import Response, Uint8Array, fetch as js_fetch
 from pyodide.ffi import to_js
 from workers import fetch
 
@@ -542,12 +542,6 @@ async def _download_attachment(url: str):
     return raw_bytes, None
 
 
-def _bytes_to_js_array_buffer(raw_bytes: bytes):
-    arr = Uint8Array.new(len(raw_bytes))
-    arr.set(to_js(list(raw_bytes)))
-    return arr.buffer
-
-
 def _build_multipart_body(
     request_json: str,
     raw_bytes: bytes,
@@ -579,6 +573,23 @@ def _build_multipart_body(
     return body_bytes, content_type
 
 
+def _make_js_uint8_array(data_bytes: bytes):
+    arr = Uint8Array.new(len(data_bytes))
+    arr.set(to_js(list(data_bytes)))
+    return arr
+
+
+async def _do_js_upload(url: str, headers_dict: dict, body_bytes: bytes):
+    js_arr = _make_js_uint8_array(body_bytes)
+    js_resp_body = Response.new(js_arr).body
+    init = to_js({
+        "method": "POST",
+        "headers": headers_dict,
+        "body": js_resp_body,
+    })
+    return await js_fetch(url, init)
+
+
 async def _upload_to_roblox_group(
     cookie_val: str,
     raw_bytes: bytes,
@@ -606,29 +617,21 @@ async def _upload_to_roblox_group(
         safe_filename,
     )
 
+    print(f"[uploadaudio] multipart body bytes: {len(body_bytes)}")
+
     headers = {
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
     }
 
-    res = await fetch(
-        _ASSET_UPLOAD_URL,
-        method="POST",
-        headers=headers,
-        body=_bytes_to_js_array_buffer(body_bytes),
-    )
+    res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes)
 
     if res.status == 403:
         csrf = res.headers.get("x-csrf-token")
         if csrf:
             headers["x-csrf-token"] = csrf
-            res = await fetch(
-                _ASSET_UPLOAD_URL,
-                method="POST",
-                headers=headers,
-                body=_bytes_to_js_array_buffer(body_bytes),
-            )
+            res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes)
 
     challenge_headers = {
         "challenge_id": res.headers.get("rblx-challenge-id"),
