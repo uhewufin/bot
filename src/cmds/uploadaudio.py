@@ -4,6 +4,7 @@ import re
 import uuid
 
 from js import Uint8Array
+from pyodide.ffi import to_js
 from workers import fetch
 
 _KV_POOL_KEY = "cookie_pool"
@@ -542,9 +543,12 @@ async def _download_attachment(url: str):
 
 
 def _bytes_to_js_uint8_array(raw_bytes: bytes):
-    arr = Uint8Array.new(len(raw_bytes))
-    arr.assign(bytearray(raw_bytes))
-    return arr
+    try:
+        return to_js(raw_bytes)
+    except Exception:
+        arr = Uint8Array.new(len(raw_bytes))
+        arr.set(to_js(list(raw_bytes)))
+        return arr
 
 
 def _build_multipart_body(
@@ -609,6 +613,7 @@ async def _upload_to_roblox_group(
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
+        "Content-Length": str(len(body_bytes)),
     }
 
     js_body = _bytes_to_js_uint8_array(body_bytes)
@@ -628,7 +633,7 @@ async def _upload_to_roblox_group(
                 _ASSET_UPLOAD_URL,
                 method="POST",
                 headers=headers,
-                body=js_body,
+                body=_bytes_to_js_uint8_array(body_bytes),
             )
 
     challenge_headers = {
