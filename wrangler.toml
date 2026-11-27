@@ -4,7 +4,7 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["python_workers"]
 
 [[kv_namespaces]]
-binding = "UhewBotCookieKV2"
+binding = "UhewBotCookieKV"
 id = "30ee66bf30734ca087f4504b0d33c974"
 
 [vars]
