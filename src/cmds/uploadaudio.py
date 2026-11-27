@@ -3,7 +3,7 @@ import os
 import re
 import uuid
 
-from js import Blob, FormData
+from js import Blob, FormData, Uint8Array
 from pyodide.ffi import to_js
 from workers import fetch
 
@@ -514,7 +514,6 @@ async def _response_to_bytes(res) -> bytes:
         return bytes(py_buf)
 
     try:
-        from js import Uint8Array
         return bytes(Uint8Array.new(buf).to_py())
     except Exception:
         return bytes(py_buf)
@@ -541,6 +540,12 @@ async def _download_attachment(url: str):
         )
 
     return raw_bytes, None
+
+
+def _bytes_to_js_uint8_array(raw_bytes: bytes):
+    arr = Uint8Array.new(len(raw_bytes))
+    arr.assign(bytearray(raw_bytes))
+    return arr
 
 
 async def _upload_to_roblox_group(
@@ -571,7 +576,8 @@ async def _upload_to_roblox_group(
 
     def _build_body():
         form_data = FormData.new()
-        file_blob = Blob.new(to_js([raw_bytes]), to_js({"type": "application/octet-stream"}))
+        js_bytes = _bytes_to_js_uint8_array(raw_bytes)
+        file_blob = Blob.new(to_js([js_bytes]), to_js({"type": "application/octet-stream"}))
         request_blob = Blob.new(to_js([request_json]), to_js({"type": "application/json"}))
         form_data.append("fileContent", file_blob, safe_filename)
         form_data.append("request", request_blob, "request.json")
