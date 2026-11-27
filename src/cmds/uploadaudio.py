@@ -542,13 +542,10 @@ async def _download_attachment(url: str):
     return raw_bytes, None
 
 
-def _bytes_to_js_uint8_array(raw_bytes: bytes):
-    try:
-        return to_js(raw_bytes)
-    except Exception:
-        arr = Uint8Array.new(len(raw_bytes))
-        arr.set(to_js(list(raw_bytes)))
-        return arr
+def _bytes_to_js_array_buffer(raw_bytes: bytes):
+    arr = Uint8Array.new(len(raw_bytes))
+    arr.set(to_js(list(raw_bytes)))
+    return arr.buffer
 
 
 def _build_multipart_body(
@@ -613,16 +610,13 @@ async def _upload_to_roblox_group(
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
-        "Content-Length": str(len(body_bytes)),
     }
-
-    js_body = _bytes_to_js_uint8_array(body_bytes)
 
     res = await fetch(
         _ASSET_UPLOAD_URL,
         method="POST",
         headers=headers,
-        body=js_body,
+        body=_bytes_to_js_array_buffer(body_bytes),
     )
 
     if res.status == 403:
@@ -633,7 +627,7 @@ async def _upload_to_roblox_group(
                 _ASSET_UPLOAD_URL,
                 method="POST",
                 headers=headers,
-                body=_bytes_to_js_uint8_array(body_bytes),
+                body=_bytes_to_js_array_buffer(body_bytes),
             )
 
     challenge_headers = {
