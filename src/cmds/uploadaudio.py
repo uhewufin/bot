@@ -1,9 +1,10 @@
-import base64
 import json
 import os
 import re
 import uuid
 
+from js import Blob, File, FormData
+from pyodide.ffi import to_js
 from workers import fetch
 
 _KV_POOL_KEY = "cookie_pool"
@@ -559,32 +560,67 @@ async def _upload_to_roblox_group(
     cookie_val: str,
     raw_bytes: bytes,
     audio_name: str,
-    duration_seconds: float,
+    filename: str,
     group_id: int,
 ):
-    payload = {
-        "name": audio_name[:50],
-        "file": base64.b64encode(raw_bytes).decode("utf-8"),
-        "groupId": group_id,
-        "paymentSource": "Group",
-        "estimatedFileSize": len(raw_bytes),
-        "estimatedDuration": duration_seconds,
-        "assetPrivacy": 1,
-    }
-
-    status, data = await _roblox_request(
-        _ASSET_UPLOAD_URL,
-        cookie_val,
-        method="POST",
-        body=payload,
+    safe_filename = re.sub(r'[\r\n"\\]', "_", os.path.basename(filename)) or "audio.ogg"
+    request_json = json.dumps(
+        {
+            "displayName": audio_name[:50],
+            "description": "",
+            "assetType": "Audio",
+            "creationContext": {
+                "creator": {"groupId": group_id},
+                "expectedPrice": 0,
+            },
+        },
+        separators=(",", ":"),
     )
 
-    if _has_challenge_marker(status, data):
+    form_data = FormData.new()
+    file_blob = Blob.new(to_js([raw_bytes]), to_js({"type": "application/octet-stream"}))
+    request_blob = Blob.new(to_js([request_json]), to_js({"type": "application/json"}))
+    form_data.append("fileContent", file_blob, safe_filename)
+    form_data.append("request", request_blob, "request.json")
+
+    headers = {
+        **_ROBLOX_HEADERS,
+        "Cookie": f".ROBLOSECURITY={cookie_val}",
+    }
+
+    res = await fetch(
+        _ASSET_UPLOAD_URL,
+        method="POST",
+        headers=headers,
+        body=form_data,
+    )
+
+    challenge_headers = {
+        "challenge_id": res.headers.get("rblx-challenge-id"),
+        "challenge_type": res.headers.get("rblx-challenge-type"),
+        "challenge_metadata": res.headers.get("rblx-challenge-metadata"),
+    }
+
+    text_body = await res.text()
+
+    try:
+        data = json.loads(text_body) if text_body else {}
+    except Exception:
+        data = {"raw": text_body[:500]}
+
+    if not isinstance(data, dict):
+        data = {"response": data}
+
+    if any(challenge_headers.values()):
+        data["_challenge_detected"] = True
+        data["_challenge_headers"] = challenge_headers
+
+    if _has_challenge_marker(res.status, data):
         return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
 
-    if status < 200 or status >= 300:
+    if res.status < 200 or res.status >= 300:
         return False, (
-            f"Roblox upload failed (HTTP {status}): "
+            f"Roblox upload failed (HTTP {res.status}): "
             f"{json.dumps(data)[:500]}"
         )
 
@@ -776,8 +812,6 @@ async def _on_button_click(
             )
             return
 
-        duration = _estimate_duration_seconds(raw_bytes, filename)
-
         await _send_message(
             app_id,
             token,
@@ -789,7 +823,7 @@ async def _on_button_click(
             cookie_val,
             raw_bytes,
             audio_name,
-            duration,
+            filename,
             group_id,
         )
 
