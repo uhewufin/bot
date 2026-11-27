@@ -11,6 +11,7 @@ _KV_POOL_KEY = "cookie_pool"
 _KV_QUARANTINE_KEY = "cookie_quarantine"
 _PENDING_PREFIX = "pending_audio:"
 _ASSET_UPLOAD_URL = "https://apis.roblox.com/assets/user-auth/v1/assets"
+_CSRF_URL = "https://auth.roblox.com/v2/logout"
 _GROUP_JOIN_URL = "https://groups.roblox.com/v1/groups/{}/users"
 _GROUPS_URL = "https://groups.roblox.com/v2/users/{}/groups/roles"
 _AUTH_URL = "https://users.roblox.com/v1/users/authenticated"
@@ -602,6 +603,27 @@ def _make_js_blob(data_bytes: bytes, mime_type: str):
     return Blob.new(to_js([arr]), to_js({"type": mime_type}))
 
 
+async def _fetch_csrf_token(cookie_val: str) -> str | None:
+    headers = {
+        **_CREATOR_UPLOAD_HEADERS,
+        "Cookie": f".ROBLOSECURITY={cookie_val}",
+    }
+    js_headers = Headers.new()
+    for k, v in headers.items():
+        js_headers.set(k, v)
+
+    req = Request.new(
+        _CSRF_URL,
+        to_js({
+            "method": "POST",
+            "headers": js_headers,
+        }),
+    )
+    res = await js_fetch(req)
+    token = res.headers.get("x-csrf-token")
+    return str(token) if token else None
+
+
 async def _do_js_upload(
     url: str,
     headers_dict: dict,
@@ -652,11 +674,16 @@ async def _upload_to_roblox_group(
 
     print(f"[uploadaudio] multipart body bytes: {len(body_bytes)}")
 
+    csrf_token = await _fetch_csrf_token(cookie_val)
+    print(f"[uploadaudio] fetched csrf token: {bool(csrf_token)}")
+
     headers = {
         **_CREATOR_UPLOAD_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
     }
+    if csrf_token:
+        headers["x-csrf-token"] = csrf_token
 
     res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes, content_type)
 
