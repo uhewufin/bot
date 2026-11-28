@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -11,7 +12,8 @@ _KV_POOL_KEY = "cookie_pool"
 _KV_QUARANTINE_KEY = "cookie_quarantine"
 _PENDING_PREFIX = "pending_audio:"
 _ASSET_UPLOAD_URL = "https://apis.roblox.com/assets/user-auth/v1/assets"
-_CSRF_URL = "https://auth.roblox.com/v2/logout"
+_OPERATION_URL = "https://apis.roblox.com/assets/user-auth/v1/operations/{}"
+_CSRF_URL = "https://auth.roblox.com/"
 _GROUP_JOIN_URL = "https://groups.roblox.com/v1/groups/{}/users"
 _GROUPS_URL = "https://groups.roblox.com/v2/users/{}/groups/roles"
 _AUTH_URL = "https://users.roblox.com/v1/users/authenticated"
@@ -27,16 +29,6 @@ _DISCORD_HEADERS = {
 _ROBLOX_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "Roblox/WinInet",
-}
-
-_CREATOR_UPLOAD_HEADERS = {
-    "Accept": "*/*",
-    "Origin": "https://create.roblox.com",
-    "Referer": "https://create.roblox.com/",
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-    ),
 }
 
 
@@ -231,7 +223,6 @@ async def _get_first_cookie(env):
 
 
 def _has_challenge_marker(status: int, data: dict) -> bool:
-    """Conservative challenge detection; ordinary 403s are not enough."""
     if not isinstance(data, dict):
         return False
 
@@ -259,7 +250,6 @@ async def _quarantine_cookie(
     account_label: str,
     reason: str,
 ):
-    """Move a challenged cookie out of the active pool, retaining it for review."""
     kv = getattr(env, "UhewBotCookieKV", None)
 
     if kv is None:
@@ -270,19 +260,15 @@ async def _quarantine_cookie(
 
     try:
         pool = json.loads(pool_raw) if pool_raw else []
-
         if not isinstance(pool, list):
             pool = []
-
     except Exception:
         return False, "Cookie pool could not be parsed; no changes were made."
 
     try:
         quarantine = json.loads(quarantine_raw) if quarantine_raw else []
-
         if not isinstance(quarantine, list):
             quarantine = []
-
     except Exception:
         quarantine = []
 
@@ -291,11 +277,9 @@ async def _quarantine_cookie(
 
     for entry in pool:
         value = entry.get("cookie") if isinstance(entry, dict) else entry
-
         if _normalize_cookie(str(value or "")) == cookie_val:
             removed = True
             continue
-
         kept.append(entry)
 
     if not removed:
@@ -320,8 +304,6 @@ async def _roblox_request(
     method: str = "GET",
     body=None,
 ):
-    """Make a Roblox request and retry once if Roblox returns a CSRF token."""
-
     headers = {
         **_ROBLOX_HEADERS,
         "Cookie": f".ROBLOSECURITY={cookie_val}",
@@ -342,10 +324,8 @@ async def _roblox_request(
 
     if res.status == 403:
         csrf = res.headers.get("x-csrf-token")
-
         if csrf:
-            headers["x-csrf-token"] = csrf
-
+            headers["X-CSRF-Token"] = csrf
             res = await fetch(
                 url,
                 method=method,
@@ -377,17 +357,10 @@ async def _roblox_request(
 
 
 async def _ensure_group_membership(cookie_val: str, group_id: int):
-    """Check membership and attempt to join if necessary."""
-
     try:
-        status, account = await _roblox_request(
-            _AUTH_URL,
-            cookie_val,
-        )
-
+        status, account = await _roblox_request(_AUTH_URL, cookie_val)
         if _has_challenge_marker(status, account):
             return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
-
     except Exception as exc:
         return False, f"Could not verify Roblox account: {exc}"
 
@@ -408,10 +381,8 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             _GROUPS_URL.format(user_id),
             cookie_val,
         )
-
         if _has_challenge_marker(status, memberships):
             return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
-
     except Exception as exc:
         return False, f"Could not check group membership: {exc}"
 
@@ -429,7 +400,6 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
 
     for entry in group_entries:
         group = entry.get("group") or {}
-
         try:
             existing_group_id = int(group.get("id"))
         except (TypeError, ValueError):
@@ -448,29 +418,24 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             method="POST",
             body={},
         )
-
         if _has_challenge_marker(status, join_result):
             return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
-
     except Exception as exc:
         return False, f"Could not submit group join request: {exc}"
 
     if status < 200 or status >= 300:
         detail = json.dumps(join_result)[:500]
-
         if status == 403:
             return False, (
                 "Roblox denied the group join request (HTTP 403). "
                 "The group may require approval, a CAPTCHA, or other "
                 f"conditions. Roblox response: `{detail}`"
             )
-
         if status == 429:
             return False, (
                 "Roblox rate-limited the group join request. "
                 "Wait before trying again."
             )
-
         return False, (
             f"Could not join group `{group_id}` (HTTP {status}): "
             f"`{detail}`"
@@ -481,10 +446,8 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
             _GROUPS_URL.format(user_id),
             cookie_val,
         )
-
         if _has_challenge_marker(verify_status, verify_data):
             return False, "CHALLENGE_DETECTED: Roblox returned a security challenge."
-
     except Exception as exc:
         return False, (
             f"Roblox accepted the join request, but membership "
@@ -493,10 +456,8 @@ async def _ensure_group_membership(cookie_val: str, group_id: int):
 
     if verify_status == 200:
         entries = verify_data.get("data", [])
-
         for entry in entries:
             group = entry.get("group") or {}
-
             try:
                 if int(group.get("id")) == group_id:
                     return True, (
@@ -566,12 +527,12 @@ def _audio_mime_type(filename: str) -> str:
     return "application/octet-stream"
 
 
-def _build_multipart_body(
-    request_json: str,
+def _build_requests_style_multipart(
     raw_bytes: bytes,
     filename: str,
+    request_json: str,
 ) -> tuple[bytes, str]:
-    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+    boundary = uuid.uuid4().hex
     crlf = b"\r\n"
     mime_type = _audio_mime_type(filename)
 
@@ -585,16 +546,14 @@ def _build_multipart_body(
         b"",
         raw_bytes,
         f"--{boundary}".encode("utf-8"),
-        b'Content-Disposition: form-data; name="request"',
+        b'Content-Disposition: form-data; name="request"; filename=""',
         b"",
         request_json.encode("utf-8"),
         f"--{boundary}--".encode("utf-8"),
         b"",
     ]
 
-    body_bytes = crlf.join(parts)
-    content_type = f"multipart/form-data; boundary={boundary}"
-    return body_bytes, content_type
+    return crlf.join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 def _make_js_blob(data_bytes: bytes, mime_type: str):
@@ -603,28 +562,19 @@ def _make_js_blob(data_bytes: bytes, mime_type: str):
     return Blob.new(to_js([arr]), to_js({"type": mime_type}))
 
 
-async def _fetch_csrf_token(cookie_val: str) -> str | None:
-    headers = {
-        **_CREATOR_UPLOAD_HEADERS,
-        "Cookie": f".ROBLOSECURITY={cookie_val}",
-    }
-    js_headers = Headers.new()
-    for k, v in headers.items():
-        js_headers.set(k, v)
-
-    req = Request.new(
+async def _setup_csrf_token(cookie_val: str) -> str | None:
+    res = await fetch(
         _CSRF_URL,
-        to_js({
-            "method": "POST",
-            "headers": js_headers,
-        }),
+        method="POST",
+        headers={
+            "Cookie": f".ROBLOSECURITY={cookie_val}",
+        },
     )
-    res = await js_fetch(req)
     token = res.headers.get("x-csrf-token")
     return str(token) if token else None
 
 
-async def _do_js_upload(
+async def _post_multipart(
     url: str,
     headers_dict: dict,
     body_bytes: bytes,
@@ -646,6 +596,27 @@ async def _do_js_upload(
     return await js_fetch(req)
 
 
+async def _poll_operation(cookie_val: str, operation_id: str) -> str | None:
+    for _ in range(8):
+        await asyncio.sleep(3)
+        status, op_data = await _roblox_request(
+            _OPERATION_URL.format(operation_id),
+            cookie_val,
+        )
+        if status == 200 and isinstance(op_data, dict):
+            resp = op_data.get("response") or {}
+            asset_id = (
+                op_data.get("assetId")
+                or resp.get("assetId")
+                or resp.get("id")
+            )
+            if asset_id:
+                return str(asset_id)
+            if op_data.get("done") is True:
+                break
+    return None
+
+
 async def _upload_to_roblox_group(
     cookie_val: str,
     raw_bytes: bytes,
@@ -653,7 +624,10 @@ async def _upload_to_roblox_group(
     filename: str,
     group_id: int,
 ):
-    safe_filename = re.sub(r'[\r\n"\\]', "_", os.path.basename(filename)) or "audio.ogg"
+    safe_filename = (
+        re.sub(r'[\r\n"\\]', "_", os.path.basename(filename))
+        or "audio.ogg"
+    )
     request_json = json.dumps(
         {
             "displayName": audio_name[:50],
@@ -666,32 +640,35 @@ async def _upload_to_roblox_group(
         separators=(",", ":"),
     )
 
-    body_bytes, content_type = _build_multipart_body(
-        request_json,
+    body_bytes, content_type = _build_requests_style_multipart(
         raw_bytes,
         safe_filename,
+        request_json,
     )
 
-    print(f"[uploadaudio] multipart body bytes: {len(body_bytes)}")
-
-    csrf_token = await _fetch_csrf_token(cookie_val)
-    print(f"[uploadaudio] fetched csrf token: {bool(csrf_token)}")
+    csrf_token = await _setup_csrf_token(cookie_val)
+    print(f"[uploadaudio] csrf_token={bool(csrf_token)}")
 
     headers = {
-        **_CREATOR_UPLOAD_HEADERS,
+        "Accept": "*/*",
         "Cookie": f".ROBLOSECURITY={cookie_val}",
         "Content-Type": content_type,
     }
     if csrf_token:
-        headers["x-csrf-token"] = csrf_token
+        headers["X-CSRF-Token"] = csrf_token
 
-    res = await _do_js_upload(_ASSET_UPLOAD_URL, headers, body_bytes, content_type)
+    res = await _post_multipart(
+        _ASSET_UPLOAD_URL,
+        headers,
+        body_bytes,
+        content_type,
+    )
 
     if res.status == 403:
         csrf = res.headers.get("x-csrf-token")
         if csrf:
-            headers["x-csrf-token"] = csrf
-            res = await _do_js_upload(
+            headers["X-CSRF-Token"] = csrf
+            res = await _post_multipart(
                 _ASSET_UPLOAD_URL,
                 headers,
                 body_bytes,
@@ -705,6 +682,7 @@ async def _upload_to_roblox_group(
     }
 
     text_body = await res.text()
+    print(f"[uploadaudio] upload status={res.status} body={text_body[:300]}")
 
     try:
         data = json.loads(text_body) if text_body else {}
@@ -726,6 +704,12 @@ async def _upload_to_roblox_group(
             f"Roblox upload failed (HTTP {res.status}): "
             f"{json.dumps(data)[:500]}"
         )
+
+    operation_id = data.get("operationId")
+    if operation_id and not (data.get("assetId") or data.get("id")):
+        polled_id = await _poll_operation(cookie_val, str(operation_id))
+        if polled_id:
+            data["assetId"] = polled_id
 
     return True, data
 
